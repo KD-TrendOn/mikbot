@@ -23,5 +23,5 @@ async def process_user_input(user_input: str, user_id: str) -> Dict[str, str]:
     result = await graph_runtime.ainvoke(initial_state, config=config)
     return {
         "answer": result['answer'],
-        "tool_result": result.get('tool_result', '')
+        "messages":result["messages"]
     }

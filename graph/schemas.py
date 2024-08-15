@@ -16,6 +16,7 @@ class GraphConfig(TypedDict):
 
 
 class State(TypedDict):
+    messages:Annotated[List[AnyMessage], add_messages]
     answer:AnyMessage
     user_input:str
     service: str
