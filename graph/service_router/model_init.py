@@ -1,6 +1,6 @@
 from langchain_openai import ChatOpenAI
 from typing import Literal
-from ..._settings import SETTINGS
+from ._settings import SETTINGS
 
 
 def init_chat_model(mode:Literal['light', 'main']):

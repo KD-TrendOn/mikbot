@@ -1,4 +1,4 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
@@ -7,9 +7,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from typing import TypedDict, List, Literal, Dict
-from schemas import State
-from service_router import service_router
-from subgraphs import accounts_subgraph, cards_subgraph, parking_subgraph
+from .schemas import State
+from .service_router import service_router
+from .subgraphs import accounts_subgraph, cards_subgraph, parking_subgraph
 
 # Основной граф
 main_graph = StateGraph(State)
@@ -19,7 +19,7 @@ main_graph.add_node("cards", cards_subgraph)
 main_graph.add_node("parking", parking_subgraph)
 
 
-main_graph.set_entry_point("service_router")
+main_graph.add_edge(START, "service_router")
 
 
 def route_to_service(state: State) -> Literal["accounts", "cards", "parking"]:

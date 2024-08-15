@@ -1,6 +1,6 @@
-from typing import TypedDict, List, Literal, Dict
+from typing import TypedDict, List, Literal, Dict, Annotated
 from langchain_core.messages import AnyMessage
-from langgraph.graph import add_messages
+from langgraph.graph.message import add_messages
 from langchain.pydantic_v1 import BaseModel, Field
 
 
@@ -16,13 +16,14 @@ class GraphConfig(TypedDict):
 
 
 class State(TypedDict):
-    messages: List[AnyMessage, add_messages]
-    user_input: str
+    answer:AnyMessage
+    user_input:str
     service: str
-    service_docs: str
-    tool_calls:list
-    bot_docs: str
-    answer: str
     user_id: str
-    tool_result: str
+    useless:str
 
+
+class SubState(TypedDict):
+    user_input:str
+    answer:AnyMessage
+    useless:str

@@ -7,19 +7,10 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from typing import TypedDict, List, Literal, Dict
-from schemas import State
-from graph import graph_runtime
+from .schemas import State
+from .graph import graph_runtime
 async def process_user_input(user_input: str, user_id: str) -> Dict[str, str]:
-    initial_state = State(
-        messages=[HumanMessage(content=user_input)],
-        user_input=user_input,
-        service="",
-        service_docs="",
-        bot_docs="",
-        answer="",
-        user_id=user_id,
-        tool_result=""
-    )
+    initial_state = {'messages':[('user', user_input)], "user_input":user_input, 'user_id':user_id}
     
     
     config = RunnableConfig(
