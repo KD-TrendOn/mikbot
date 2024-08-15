@@ -24,6 +24,7 @@ class State(TypedDict):
 
 
 class SubState(TypedDict):
+    messages:Annotated[List[AnyMessage], add_messages]
     user_input:str
     answer:AnyMessage
     useless:str

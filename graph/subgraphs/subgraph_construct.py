@@ -33,7 +33,7 @@ def create_worker_subgraph(worker_name: str, worker_tools: List[tool]):
         response = await chain.ainvoke({
             "user_input": state["user_input"],
         })
-        return {"answer": response}
+        return {"answer": response, "messages":response}
 
 
     subgraph = StateGraph(SubState)
