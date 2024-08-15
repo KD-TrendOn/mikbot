@@ -25,7 +25,6 @@ def create_worker_subgraph(worker_name: str, worker_tools: List[tool]):
 
 
     async def process_message(state: SubState, config: RunnableConfig) -> SubState:
-        print("1")
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a helpful banking assistant. Use the provided information to answer the user's question or call an appropriate tool."),
             ("human", "{user_input}")
@@ -58,5 +57,4 @@ def create_worker_subgraph(worker_name: str, worker_tools: List[tool]):
 
     subgraph.add_conditional_edges("process_message", should_continue)
     subgraph.add_edge("tools", END)
-    print(subgraph.compile().get_input_schema())
     return subgraph.compile()
