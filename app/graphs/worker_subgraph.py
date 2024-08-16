@@ -34,21 +34,18 @@ def create_worker_subgraph(service_name: str):
         tool_wrappers = await asyncio.create_task(load_tools(db, service_name))
         tools = create_tools(tool_wrappers)
         tool_node = ToolNode(tools)
+        
+        # Создаем описание инструментов для промпта
+        tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
+        
         logger.debug(f"Tools loaded: {[tool.name for tool in tools]}")
-        return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node}}
-
-
-
-    async def load_vector_docs_node(state: SubState):
-        logger.debug(f"Loading vector documents for query: {state.user_input}")
-        docs = await load_vector_documents(service_name, state.user_input)
-        logger.debug(f"Vector documents loaded: {len(docs)} documents")
-        return {"metadata": {**state.metadata, "vector_docs": docs}}
+        return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node, "tools_description": tools_description}}
 
     async def process_message(state: SubState):
         logger.debug("Processing message")
         service_data = state.metadata.get("service_data")
         tools = state.metadata.get("tools")
+        tools_description = state.metadata.get("tools_description")
         vector_docs = state.metadata.get("vector_docs", [])
         
         llm = init_chat_model(mode="main")
@@ -56,15 +53,36 @@ def create_worker_subgraph(service_name: str):
         
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
         
-        logger.debug(f"Invoking LLM with context length: {len(context)}")
-        response = await llm_with_tools.ainvoke({
-            "service_data": service_data,
-            "context": context,
-            "user_input": state.user_input,
-        })
-        logger.debug("LLM response received")
+        prompt = f"""You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
         
+        Available tools:
+        {tools_description}
+        
+        For each tool, you must provide a 'description' field in addition to the required arguments. 
+        This description should be a brief explanation of the action being taken, which will be shown to the user.
+        
+        Service context:
+        {service_data.documentation if service_data else 'No service data available'}
+        
+        Additional context:
+        {context}
+        
+        User input: {state.user_input}
+        
+        Please respond to the user's input using the available tools if necessary. 
+        Remember to include a meaningful description for each tool use."""
+        
+        logger.debug(f"Invoking LLM with prompt: {prompt}")
+        response = await llm_with_tools.ainvoke(prompt)
+        logger.debug("LLM response received")
         return {"answer": response, "messages": [response]}
+
+    async def load_vector_docs_node(state: SubState):
+        logger.debug(f"Loading vector documents for query: {state.user_input}")
+        docs = await load_vector_documents(service_name, state.user_input)
+        logger.debug(f"Vector documents loaded: {len(docs)} documents")
+        return {"metadata": {**state.metadata, "vector_docs": docs}}
+    
 
     subgraph.add_node("load_service_data", load_service_data_node)
     subgraph.add_node("load_tools", load_tools_node)
