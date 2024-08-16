@@ -5,5 +5,5 @@ from ..config import settings
 
 def init_chat_model(mode:Literal['light', 'main']):
     if mode=='light':
-        return ChatOpenAI(temperature=0.7, model="gpt-4o-mini", openai_api_key=settings.openai_api_key, openai_api_base=settings.openai_base_provider)
-    return ChatOpenAI(temperature=0.7, model='gpt-4o', openai_api_key=settings.openai_api_key, openai_api_base=settings.openai_base_provider)
+        return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model="gpt-4o-mini", openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)
+    return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model='gpt-4o', openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)

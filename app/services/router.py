@@ -8,7 +8,7 @@ router_parser = PydanticOutputParser(pydantic_object=RouterOutput)
 
 async def service_router(state: State, config: RunnableConfig) -> State:
     prompt_template = """You are a service router for the Tatarstan Resident Card application. 
-    Determine which service the user's request is related to: 'accounts', 'cards', 'parking', or 'legal_assistant'. 
+    Determine which service the user's request is related to: 'accounts' or 'parking'. 
     Use the following format for your answer: {format_instructions}
 
     User's input: {user_input}
@@ -25,4 +25,7 @@ async def service_router(state: State, config: RunnableConfig) -> State:
     
     result = await chain.ainvoke({"user_input": state.user_input})
     
-    return State(**state.dict(), service=result.service)
+    # Обновляем существующее состояние, а не создаем новое
+    state_dict = state.dict()
+    state_dict['service'] = result.service
+    return state_dict

@@ -1,22 +1,25 @@
-from typing import List, Dict, Any, Literal, Annotated
-from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
-from langgraph.graph.message import add_messages
 
 class State(BaseModel):
-    messages: Annotated[List[AnyMessage], add_messages]
-    service: str
+    messages: List[AnyMessage] = Field(default_factory=list)
+    service: Optional[str] = None
     user_input: str
-    answer: Any
+    answer: Any = None
     user_id: str
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class SubState(BaseModel):
-    messages: Annotated[List[AnyMessage], add_messages]
+    messages: List[AnyMessage] = Field(default_factory=list)
     user_input: str
-    answer: Any
-    service_id: str
-    metadata: Dict[str, Any] = {}
+    answer: Any = None
+    service: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class RouterOutput(BaseModel):
-    service: Literal['accounts', 'cards', 'parking', 'legal_assistant']
+    service: str
+
+class UserInput(BaseModel):
+    user_input: str
+    user_id: str

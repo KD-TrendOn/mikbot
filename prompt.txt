@@ -1,0 +1,3092 @@
+Quick Start
+In this comprehensive quick start, we will build a support chatbot in LangGraph that can:
+
+Answer common questions by searching the web
+Maintain conversation state across calls
+Route complex queries to a human for review
+Use custom state to control its behavior
+Rewind and explore alternative conversation paths
+We'll start with a basic chatbot and progressively add more sophisticated capabilities, introducing key LangGraph concepts along the way.
+
+Setup
+First, install the required packages:
+
+%%capture --no-stderr
+%pip install -U langgraph langsmith
+
+# Used for this tutorial; not a requirement for LangGraph
+%pip install -U langchain_anthropic
+Next, set your API keys:
+
+import getpass
+import os
+
+
+def _set_env(var: str):
+    if not os.environ.get(var):
+        os.environ[var] = getpass.getpass(f"{var}: ")
+
+
+_set_env("ANTHROPIC_API_KEY")
+(Encouraged) LangSmith makes it a lot easier to see what's going on "under the hood."
+
+_set_env("LANGSMITH_API_KEY")
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"] = "LangGraph Tutorial"
+Part 1: Build a Basic Chatbot
+We'll first create a simple chatbot using LangGraph. This chatbot will respond directly to user messages. Though simple, it will illustrate the core concepts of building with LangGraph. By the end of this section, you will have a built rudimentary chatbot.
+
+Start by creating a StateGraph. A StateGraph object defines the structure of our chatbot as a "state machine". We'll add nodes to represent the llm and functions our chatbot can call and edges to specify how the bot should transition between these functions.
+
+from typing import Annotated
+
+from typing_extensions import TypedDict
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+
+
+class State(TypedDict):
+    # Messages have the type "list". The `add_messages` function
+    # in the annotation defines how this state key should be updated
+    # (in this case, it appends messages to the list, rather than overwriting them)
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+Note
+
+The first thing you do when you define a graph is define the State of the graph. The State consists of the schema of the graph as well as reducer functions which specify how to apply updates to the state. In our example State is a TypedDict with a single key: messages. The messages key is annotated with the add_messages reducer function, which tells LangGraph to append new messages to the existing list, rather than overwriting it. State keys without an annotation will be overwritten by each update, storing the most recent value. Check out this conceptual guide to learn more about state, reducers and other low-level concepts.
+
+So now our graph knows two things:
+
+Every node we define will receive the current State as input and return a value that updates that state.
+messages will be appended to the current list, rather than directly overwritten. This is communicated via the prebuilt add_messages function in the Annotated syntax.
+Next, add a "chatbot" node. Nodes represent units of work. They are typically regular python functions.
+
+from langchain_anthropic import ChatAnthropic
+
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+
+
+def chatbot(state: State):
+    return {"messages": [llm.invoke(state["messages"])]}
+
+
+# The first argument is the unique node name
+# The second argument is the function or object that will be called whenever
+# the node is used.
+graph_builder.add_node("chatbot", chatbot)
+Notice how the chatbot node function takes the current State as input and returns a dictionary containing an updated messages list under the key "messages". This is the basic pattern for all LangGraph node functions.
+
+The add_messages function in our State will append the llm's response messages to whatever messages are already in the state.
+
+Next, add an entry point. This tells our graph where to start its work each time we run it.
+
+graph_builder.add_edge(START, "chatbot")
+Similarly, set a finish point. This instructs the graph "any time this node is run, you can exit."
+
+graph_builder.add_edge("chatbot", END)
+Finally, we'll want to be able to run our graph. To do so, call "compile()" on the graph builder. This creates a "CompiledGraph" we can use invoke on our state.
+
+graph = graph_builder.compile()
+You can visualize the graph using the get_graph method and one of the "draw" methods, like draw_ascii or draw_png. The draw methods each require additional dependencies.
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Now let's run the chatbot!
+
+Tip: You can exit the chat loop at any time by typing "quit", "exit", or "q".
+
+while True:
+    user_input = input("User: ")
+    if user_input.lower() in ["quit", "exit", "q"]:
+        print("Goodbye!")
+        break
+    for event in graph.stream({"messages": ("user", user_input)}):
+        for value in event.values():
+            print("Assistant:", value["messages"][-1].content)
+User:  what's langgraph all about?
+Assistant: LangGraph is a new open-source deep learning framework that focuses on enabling efficient training and deployment of large language models. Some key things to know about LangGraph:
+
+1. Efficient Training: LangGraph is designed to accelerate the training of large language models by leveraging advanced optimization techniques and parallelization strategies.
+
+2. Modular Architecture: LangGraph has a modular architecture that allows for easy customization and extension of language models, making it flexible for a variety of NLP tasks.
+
+3. Hardware Acceleration: The framework is optimized for both CPU and GPU hardware, allowing for efficient model deployment on a wide range of devices.
+
+4. Scalability: LangGraph is designed to handle large-scale language models with billions of parameters, enabling the development of state-of-the-art NLP applications.
+
+5. Open-Source: LangGraph is an open-source project, allowing developers and researchers to collaborate, contribute, and build upon the framework.
+
+6. Performance: The goal of LangGraph is to provide superior performance and efficiency compared to existing deep learning frameworks, particularly for training and deploying large language models.
+
+Overall, LangGraph is a promising new deep learning framework that aims to address the challenges of building and deploying advanced natural language processing models at scale. It is an active area of research and development, with the potential to drive further advancements in the field of language AI.
+User:  hm that doesn't seem right...
+Assistant: I'm sorry, I don't have enough context to determine what doesn't seem right. Could you please provide more details about what you're referring to? That would help me better understand and respond appropriately.
+User:  q
+Goodbye!
+Congratulations! You've built your first chatbot using LangGraph. This bot can engage in basic conversation by taking user input and generating responses using an LLM. You can inspect a LangSmith Trace for the call above at the provided link.
+
+However, you may have noticed that the bot's knowledge is limited to what's in its training data. In the next part, we'll add a web search tool to expand the bot's knowledge and make it more capable.
+
+Below is the full code for this section for your reference:
+
+Full Code
+Part 2: Enhancing the Chatbot with Tools
+To handle queries our chatbot can't answer "from memory", we'll integrate a web search tool. Our bot can use this tool to find relevant information and provide better responses.
+
+Requirements
+Before we start, make sure you have the necessary packages installed and API keys set up:
+
+First, install the requirements to use the Tavily Search Engine, and set your TAVILY_API_KEY.
+
+%%capture --no-stderr
+%pip install -U tavily-python
+%pip install -U langchain_community
+_set_env("TAVILY_API_KEY")
+Next, define the tool:
+
+from langchain_community.tools.tavily_search import TavilySearchResults
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+tool.invoke("What's a 'node' in LangGraph?")
+[{'url': 'https://medium.com/@cplog/introduction-to-langgraph-a-beginners-guide-14f9be027141',
+  'content': 'Nodes: Nodes are the building blocks of your LangGraph. Each node represents a function or a computation step. You define nodes to perform specific tasks, such as processing input, making ...'},
+ {'url': 'https://js.langchain.com/docs/langgraph',
+  'content': "Assuming you have done the above Quick Start, you can build off it like:\nHere, we manually define the first tool call that we will make.\nNotice that it does that same thing as agent would have done (adds the agentOutcome key).\n LangGraph\n🦜🕸️LangGraph.js\n⚡ Building language agents as graphs ⚡\nOverview\u200b\nLangGraph is a library for building stateful, multi-actor applications with LLMs, built on top of (and intended to be used with) LangChain.js.\n Therefore, we will use an object with one key (messages) with the value as an object: { value: Function, default?: () => any }\nThe default key must be a factory that returns the default value for that attribute.\n Streaming Node Output\u200b\nOne of the benefits of using LangGraph is that it is easy to stream output as it's produced by each node.\n What this means is that only one of the downstream edges will be taken, and which one that is depends on the results of the start node.\n"}]
+The results are page summaries our chat bot can use to answer questions.
+
+Next, we'll start defining our graph. The following is all the same as in Part 1, except we have added bind_tools on our LLM. This lets the LLM know the correct JSON format to use if it wants to use our search engine.
+
+from typing import Annotated
+
+from langchain_anthropic import ChatAnthropic
+from typing_extensions import TypedDict
+
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+
+
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+# Modification: tell the LLM which tools it can call
+llm_with_tools = llm.bind_tools(tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+
+graph_builder.add_node("chatbot", chatbot)
+Next we need to create a function to actually run the tools if they are called. We'll do this by adding the tools to a new node.
+
+Below, implement a BasicToolNode that checks the most recent message in the state and calls tools if the message contains tool_calls. It relies on the LLM's tool_calling support, which is available in Anthropic, OpenAI, Google Gemini, and a number of other LLM providers.
+
+We will later replace this with LangGraph's prebuilt ToolNode to speed things up, but building it ourselves first is instructive.
+
+import json
+
+from langchain_core.messages import ToolMessage
+
+
+class BasicToolNode:
+    """A node that runs the tools requested in the last AIMessage."""
+
+    def __init__(self, tools: list) -> None:
+        self.tools_by_name = {tool.name: tool for tool in tools}
+
+    def __call__(self, inputs: dict):
+        if messages := inputs.get("messages", []):
+            message = messages[-1]
+        else:
+            raise ValueError("No message found in input")
+        outputs = []
+        for tool_call in message.tool_calls:
+            tool_result = self.tools_by_name[tool_call["name"]].invoke(
+                tool_call["args"]
+            )
+            outputs.append(
+                ToolMessage(
+                    content=json.dumps(tool_result),
+                    name=tool_call["name"],
+                    tool_call_id=tool_call["id"],
+                )
+            )
+        return {"messages": outputs}
+
+
+tool_node = BasicToolNode(tools=[tool])
+graph_builder.add_node("tools", tool_node)
+With the tool node added, we can define the conditional_edges.
+
+Recall that edges route the control flow from one node to the next. Conditional edges usually contain "if" statements to route to different nodes depending on the current graph state. These functions receive the current graph state and return a string or list of strings indicating which node(s) to call next.
+
+Below, call define a router function called route_tools, that checks for tool_calls in the chatbot's output. Provide this function to the graph by calling add_conditional_edges, which tells the graph that whenever the chatbot node completes to check this function to see where to go next.
+
+The condition will route to tools if tool calls are present and "__end__" if not.
+
+Later, we will replace this with the prebuilt tools_condition to be more concise, but implementing it ourselves first makes things more clear.
+
+from typing import Literal
+
+
+def route_tools(
+    state: State,
+) -> Literal["tools", "__end__"]:
+    """
+    Use in the conditional_edge to route to the ToolNode if the last message
+    has tool calls. Otherwise, route to the end.
+    """
+    if isinstance(state, list):
+        ai_message = state[-1]
+    elif messages := state.get("messages", []):
+        ai_message = messages[-1]
+    else:
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+        return "tools"
+    return "__end__"
+
+
+# The `tools_condition` function returns "tools" if the chatbot asks to use a tool, and "__end__" if
+# it is fine directly responding. This conditional routing defines the main agent loop.
+graph_builder.add_conditional_edges(
+    "chatbot",
+    route_tools,
+    # The following dictionary lets you tell the graph to interpret the condition's outputs as a specific node
+    # It defaults to the identity function, but if you
+    # want to use a node named something else apart from "tools",
+    # You can update the value of the dictionary to something else
+    # e.g., "tools": "my_tools"
+    {"tools": "tools", "__end__": "__end__"},
+)
+# Any time a tool is called, we return to the chatbot to decide the next step
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+graph = graph_builder.compile()
+Notice that conditional edges start from a single node. This tells the graph "any time the 'chatbot' node runs, either go to 'tools' if it calls a tool, or end the loop if it responds directly.
+
+Like the prebuilt tools_condition, our function returns the "__end__" string if no tool calls are made. When the graph transitions to __end__, it has no more tasks to complete and ceases execution. Because the condition can return __end__, we don't need to explicitly set a finish_point this time. Our graph already has a way to finish!
+
+Let's visualize the graph we've built. The following function has some additional dependencies to run that are unimportant for this tutorial.
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Now we can ask the bot questions outside its training data.
+
+from langchain_core.messages import BaseMessage
+
+while True:
+    user_input = input("User: ")
+    if user_input.lower() in ["quit", "exit", "q"]:
+        print("Goodbye!")
+        break
+    for event in graph.stream({"messages": [("user", user_input)]}):
+        for value in event.values():
+            if isinstance(value["messages"][-1], BaseMessage):
+                print("Assistant:", value["messages"][-1].content)
+User:  what's langgraph all about?
+Assistant: [{'id': 'toolu_01L1TABSBXsHPsebWiMPNqf1', 'input': {'query': 'langgraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Assistant: [{"url": "https://langchain-ai.github.io/langgraph/", "content": "LangGraph is framework agnostic (each node is a regular python function). It extends the core Runnable API (shared interface for streaming, async, and batch calls) to make it easy to: Seamless state management across multiple turns of conversation or tool usage. The ability to flexibly route between nodes based on dynamic criteria."}, {"url": "https://blog.langchain.dev/langgraph-multi-agent-workflows/", "content": "As a part of the launch, we highlighted two simple runtimes: one that is the equivalent of the AgentExecutor in langchain, and a second that was a version of that aimed at message passing and chat models.\n It's important to note that these three examples are only a few of the possible examples we could highlight - there are almost assuredly other examples out there and we look forward to seeing what the community comes up with!\n LangGraph: Multi-Agent Workflows\nLinks\nLast week we highlighted LangGraph - a new package (available in both Python and JS) to better enable creation of LLM workflows containing cycles, which are a critical component of most agent runtimes. \"\nAnother key difference between Autogen and LangGraph is that LangGraph is fully integrated into the LangChain ecosystem, meaning you take fully advantage of all the LangChain integrations and LangSmith observability.\n As part of this launch, we're also excited to highlight a few applications built on top of LangGraph that utilize the concept of multiple agents.\n"}]
+Assistant: Based on the search results, LangGraph is a framework-agnostic Python and JavaScript library that extends the core Runnable API from the LangChain project to enable the creation of more complex workflows involving multiple agents or components. Some key things about LangGraph:
+
+- It makes it easier to manage state across multiple turns of conversation or tool usage, and to dynamically route between different nodes/components based on criteria.
+
+- It is integrated with the LangChain ecosystem, allowing you to take advantage of LangChain integrations and observability features.
+
+- It enables the creation of multi-agent workflows, where different components or agents can be chained together in more flexible and complex ways than the standard LangChain AgentExecutor.
+
+- The core idea is to provide a more powerful and flexible framework for building LLM-powered applications and workflows, beyond what is possible with just the core LangChain tools.
+
+Overall, LangGraph seems to be a useful addition to the LangChain toolkit, focused on enabling more advanced, multi-agent style applications and workflows powered by large language models.
+User:  neat!
+Assistant: I'm afraid I don't have enough context to provide a substantive response to "neat!". As an AI assistant, I'm designed to have conversations and provide information to users, but I need more details or a specific question from you in order to give a helpful reply. Could you please rephrase your request or provide some additional context? I'd be happy to assist further once I understand what you're looking for.
+User:  what?
+Assistant: I'm afraid I don't have enough context to provide a meaningful response to "what?". Could you please rephrase your request or provide more details about what you are asking? I'd be happy to try to assist you further once I have a clearer understanding of your query.
+User:  q
+Goodbye!
+Congrats! You've created a conversational agent in langgraph that can use a search engine to retrieve updated information when needed. Now it can handle a wider range of user queries. To inspect all the steps your agent just took, check out this LangSmith trace.
+
+Our chatbot still can't remember past interactions on its own, limiting its ability to have coherent, multi-turn conversations. In the next part, we'll add memory to address this.
+
+The full code for the graph we've created in this section is reproduced below, replacing our BasicToolNode for the prebuilt ToolNode, and our route_tools condition with the prebuilt tools_condition
+
+Full Code
+Part 3: Adding Memory to the Chatbot
+Our chatbot can now use tools to answer user questions, but it doesn't remember the context of previous interactions. This limits its ability to have coherent, multi-turn conversations.
+
+LangGraph solves this problem through persistent checkpointing. If you provide a checkpointer when compiling the graph and a thread_id when calling your graph, LangGraph automatically saves the state after each step. When you invoke the graph again using the same thread_id, the graph loads its saved state, allowing the chatbot to pick up where it left off.
+
+We will see later that checkpointing is much more powerful than simple chat memory - it lets you save and resume complex state at any time for error recovery, human-in-the-loop workflows, time travel interactions, and more. But before we get too ahead of ourselves, let's add checkpointing to enable multi-turn conversations.
+
+To get started, create a MemorySaver checkpointer.
+
+from langgraph.checkpoint.memory import MemorySaver
+
+memory = MemorySaver()
+Notice we're using an in-memory checkpointer. This is convenient for our tutorial (it saves it all in-memory). In a production application, you would likely change this to use SqliteSaver or PostgresSaver and connect to your own DB.
+
+Next define the graph. Now that you've already built your own BasicToolNode, we'll replace it with LangGraph's prebuilt ToolNode and tools_condition, since these do some nice things like parallel API execution. Apart from that, the following is all copied from Part 2.
+
+from typing import Annotated
+
+from langchain_anthropic import ChatAnthropic
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import BaseMessage
+from typing_extensions import TypedDict
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+llm_with_tools = llm.bind_tools(tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+
+graph_builder.add_node("chatbot", chatbot)
+
+tool_node = ToolNode(tools=[tool])
+graph_builder.add_node("tools", tool_node)
+
+graph_builder.add_conditional_edges(
+    "chatbot",
+    tools_condition,
+)
+# Any time a tool is called, we return to the chatbot to decide the next step
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+/Users/wfh/code/lc/langchain/libs/core/langchain_core/_api/beta_decorator.py:87: LangChainBetaWarning: The method `ChatAnthropic.bind_tools` is in beta. It is actively being worked on, so the API may change.
+  warn_beta(
+Finally, compile the graph with the provided checkpointer.
+
+graph = graph_builder.compile(checkpointer=memory)
+Notice the connectivity of the graph hasn't changed since Part 2. All we are doing is checkpointing the State as the graph works through each node.
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Now you can interact with your bot! First, pick a thread to use as the key for this conversation.
+
+config = {"configurable": {"thread_id": "1"}}
+Next, call your chat bot.
+
+user_input = "Hi there! My name is Will."
+
+# The config is the **second positional argument** to stream() or invoke()!
+events = graph.stream(
+    {"messages": [("user", user_input)]}, config, stream_mode="values"
+)
+for event in events:
+    event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+Hi there! My name is Will.
+================================== Ai Message ==================================
+
+It's nice to meet you, Will! I'm an AI assistant created by Anthropic. I'm here to help you with any questions or tasks you may have. Please let me know how I can assist you today.
+Note: The config was provided as the second positional argument when calling our graph. It importantly is not nested within the graph inputs ({'messages': []}).
+
+Let's ask a followup: see if it remembers your name.
+
+user_input = "Remember my name?"
+
+# The config is the **second positional argument** to stream() or invoke()!
+events = graph.stream(
+    {"messages": [("user", user_input)]}, config, stream_mode="values"
+)
+for event in events:
+    event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+Remember my name?
+================================== Ai Message ==================================
+
+Of course, your name is Will. It's nice to meet you again!
+Notice that we aren't using an external list for memory: it's all handled by the checkpointer! You can inspect the full execution in this LangSmith trace to see what's going on.
+
+Don't believe me? Try this using a different config.
+
+# The only difference is we change the `thread_id` here to "2" instead of "1"
+events = graph.stream(
+    {"messages": [("user", user_input)]},
+    {"configurable": {"thread_id": "2"}},
+    stream_mode="values",
+)
+for event in events:
+    event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+Remember my name?
+================================== Ai Message ==================================
+
+I'm afraid I don't actually have the capability to remember your name. As an AI assistant, I don't have a persistent memory of our previous conversations or interactions. I respond based on the current context provided to me. Could you please restate your name or provide more information so I can try to assist you?
+Notice that the only change we've made is to modify the thread_id in the config. See this call's LangSmith trace for comparison.
+
+By now, we have made a few checkpoints across two different threads. But what goes into a checkpoint? To inspect a graph's state for a given config at any time, call get_state(config).
+
+snapshot = graph.get_state(config)
+snapshot
+StateSnapshot(values={'messages': [HumanMessage(content='Hi there! My name is Will.', id='aad97d7f-8845-4f9e-b723-2af3b7c97590'), AIMessage(content="It's nice to meet you, Will! I'm an AI assistant created by Anthropic. I'm here to help you with any questions or tasks you may have. Please let me know how I can assist you today.", response_metadata={'id': 'msg_01VCz7Y5jVmMZXibBtnECyvJ', 'model': 'claude-3-haiku-20240307', 'stop_reason': 'end_turn', 'stop_sequence': None, 'usage': {'input_tokens': 375, 'output_tokens': 49}}, id='run-66cf1695-5ba8-4fd8-a79d-ded9ee3c3b33-0'), HumanMessage(content='Remember my name?', id='ac1e9971-dbee-4622-9e63-5015dee05c20'), AIMessage(content="Of course, your name is Will. It's nice to meet you again!", response_metadata={'id': 'msg_01RsJ6GaQth7r9soxbF7TSpQ', 'model': 'claude-3-haiku-20240307', 'stop_reason': 'end_turn', 'stop_sequence': None, 'usage': {'input_tokens': 431, 'output_tokens': 19}}, id='run-890149d3-214f-44e8-9717-57ec4ef68224-0')]}, next=(), config={'configurable': {'thread_id': '1', 'thread_ts': '2024-05-06T22:23:20.430350+00:00'}}, parent_config=None)
+snapshot.next  # (since the graph ended this turn, `next` is empty. If you fetch a state from within a graph invocation, next tells which node will execute next)
+()
+The snapshot above contains the current state values, corresponding config, and the next node to process. In our case, the graph has reached an __end__ state, so next is empty.
+
+Congratulations! Your chatbot can now maintain conversation state across sessions thanks to LangGraph's checkpointing system. This opens up exciting possibilities for more natural, contextual interactions. LangGraph's checkpointing even handles arbitrarily complex graph states, which is much more expressive and powerful than simple chat memory.
+
+In the next part, we'll introduce human oversight to our bot to handle situations where it may need guidance or verification before proceeding.
+
+Check out the code snippet below to review our graph from this section.
+
+Full Code
+Part 4: Human-in-the-loop
+Agents can be unreliable and may need human input to successfully accomplish tasks. Similarly, for some actions, you may want to require human approval before running to ensure that everything is running as intended.
+
+LangGraph supports human-in-the-loop workflows in a number of ways. In this section, we will use LangGraph's interrupt_before functionality to always break the tool node.
+
+First, start from our existing code. The following is copied from Part 3.
+
+from typing import Annotated
+
+from langchain_anthropic import ChatAnthropic
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import BaseMessage
+from typing_extensions import TypedDict
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+memory = MemorySaver()
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+llm_with_tools = llm.bind_tools(tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+
+graph_builder.add_node("chatbot", chatbot)
+
+tool_node = ToolNode(tools=[tool])
+graph_builder.add_node("tools", tool_node)
+
+graph_builder.add_conditional_edges(
+    "chatbot",
+    tools_condition,
+)
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+Now, compile the graph, specifying to interrupt_before the tools node.
+
+graph = graph_builder.compile(
+    checkpointer=memory,
+    # This is new!
+    interrupt_before=["tools"],
+    # Note: can also interrupt __after__ tools, if desired.
+    # interrupt_after=["tools"]
+)
+user_input = "I'm learning LangGraph. Could you do some research on it for me?"
+config = {"configurable": {"thread_id": "1"}}
+# The config is the **second positional argument** to stream() or invoke()!
+events = graph.stream(
+    {"messages": [("user", user_input)]}, config, stream_mode="values"
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+I'm learning LangGraph. Could you do some research on it for me?
+================================== Ai Message ==================================
+
+[{'text': "Okay, let's look up some information on LangGraph:", 'type': 'text'}, {'id': 'toolu_01XoHVKTRbipJokQorfifzvh', 'input': {'query': 'LangGraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Tool Calls:
+  tavily_search_results_json (toolu_01XoHVKTRbipJokQorfifzvh)
+ Call ID: toolu_01XoHVKTRbipJokQorfifzvh
+  Args:
+    query: LangGraph
+Let's inspect the graph state to confirm it worked.
+
+snapshot = graph.get_state(config)
+snapshot.next
+('tools',)
+Notice that unlike last time, the "next" node is set to 'tools'. We've interrupted here! Let's check the tool invocation.
+
+existing_message = snapshot.values["messages"][-1]
+existing_message.tool_calls
+[{'name': 'tavily_search_results_json',
+  'args': {'query': 'LangGraph'},
+  'id': 'toolu_01XoHVKTRbipJokQorfifzvh',
+  'type': 'tool_call'}]
+This query seems reasonable. Nothing to filter here. The simplest thing the human can do is just let the graph continue executing. Let's do that below.
+
+Next, continue the graph! Passing in None will just let the graph continue where it left off, without adding anything new to the state.
+
+# `None` will append nothing new to the current state, letting it resume as if it had never been interrupted
+events = graph.stream(None, config, stream_mode="values")
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================= Tool Message =================================
+Name: tavily_search_results_json
+
+[{"url": "https://langchain-ai.github.io/langgraph/tutorials/", "content": "LangGraph is a framework for building language agents as graphs. Learn how to use LangGraph to create chatbots, code assistants, planning agents, reflection agents, and more with these notebooks."}, {"url": "https://github.com/langchain-ai/langgraph", "content": "LangGraph is a library for creating stateful, multi-actor applications with LLMs, using cycles, controllability, and persistence. Learn how to use LangGraph with examples, integration with LangChain, and streaming support."}]
+================================== Ai Message ==================================
+
+Based on the search results, LangGraph seems to be a framework for building language-based AI agents and applications using language models. It provides a modular, graph-based approach for creating chatbots, code assistants, planning agents, and other language-centric applications.
+
+Some key things I learned about LangGraph:
+
+- It is designed to make it easier to build stateful, multi-actor applications using large language models (LLMs).
+- It provides features like cycles, controllability, and persistence to help manage the complexity of these types of applications.
+- LangGraph can be integrated with the LangChain library, which provides additional tools for building LLM-powered applications.
+- The framework includes examples and tutorials to help get started with using LangGraph.
+
+Overall, LangGraph seems like a promising approach for building more advanced, graph-based language applications on top of large language models. Let me know if you need any other details on LangGraph and how it works!
+Review this call's LangSmith trace to see the exact work that was done in the above call. Notice that the state is loaded in the first step so that your chatbot can continue where it left off.
+
+Congrats! You've used an interrupt to add human-in-the-loop execution to your chatbot, allowing for human oversight and intervention when needed. This opens up the potential UIs you can create with your AI systems. Since we have already added a checkpointer, the graph can be paused indefinitely and resumed at any time as if nothing had happened.
+
+Next, we'll explore how to further customize the bot's behavior using custom state updates.
+
+Below is a copy of the code you used in this section. The only difference between this and the previous parts is the addition of the interrupt_before argument.
+
+Full Code
+Part 5: Manually Updating the State
+In the previous section, we showed how to interrupt a graph so that a human could inspect its actions. This lets the human read the state, but if they want to change their agent's course, they'll need to have write access.
+
+Thankfully, LangGraph lets you manually update state! Updating the state lets you control the agent's trajectory by modifying its actions (even modifying the past!). This capability is particularly useful when you want to correct the agent's mistakes, explore alternative paths, or guide the agent towards a specific goal.
+
+We'll show how to update a checkpointed state below. As before, first, define your graph. We'll reuse the exact same graph as before.
+
+from typing import Annotated
+
+from langchain_anthropic import ChatAnthropic
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import BaseMessage
+from typing_extensions import TypedDict
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+llm_with_tools = llm.bind_tools(tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+
+graph_builder.add_node("chatbot", chatbot)
+
+tool_node = ToolNode(tools=[tool])
+graph_builder.add_node("tools", tool_node)
+
+graph_builder.add_conditional_edges(
+    "chatbot",
+    tools_condition,
+)
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+memory = MemorySaver()
+graph = graph_builder.compile(
+    checkpointer=memory,
+    # This is new!
+    interrupt_before=["tools"],
+    # Note: can also interrupt **after** actions, if desired.
+    # interrupt_after=["tools"]
+)
+
+user_input = "I'm learning LangGraph. Could you do some research on it for me?"
+config = {"configurable": {"thread_id": "1"}}
+# The config is the **second positional argument** to stream() or invoke()!
+events = graph.stream({"messages": [("user", user_input)]}, config)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+/Users/wfh/code/lc/langchain/libs/core/langchain_core/_api/beta_decorator.py:87: LangChainBetaWarning: The method `ChatAnthropic.bind_tools` is in beta. It is actively being worked on, so the API may change.
+  warn_beta(
+snapshot = graph.get_state(config)
+existing_message = snapshot.values["messages"][-1]
+existing_message.pretty_print()
+================================== Ai Message ==================================
+
+[{'id': 'toolu_01DTyDpJ1kKdNps5yxv3AGJd', 'input': {'query': 'LangGraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Tool Calls:
+  tavily_search_results_json (toolu_01DTyDpJ1kKdNps5yxv3AGJd)
+ Call ID: toolu_01DTyDpJ1kKdNps5yxv3AGJd
+  Args:
+    query: LangGraph
+So far, all of this is an exact repeat of the previous section. The LLM just requested to use the search engine tool and our graph was interrupted. If we proceed as before, the tool will be called to search the web.
+
+But what if the user wants to intercede? What if we think the chat bot doesn't need to use the tool?
+
+Let's directly provide the correct response!
+
+from langchain_core.messages import AIMessage
+
+answer = (
+    "LangGraph is a library for building stateful, multi-actor applications with LLMs."
+)
+new_messages = [
+    # The LLM API expects some ToolMessage to match its tool call. We'll satisfy that here.
+    ToolMessage(content=answer, tool_call_id=existing_message.tool_calls[0]["id"]),
+    # And then directly "put words in the LLM's mouth" by populating its response.
+    AIMessage(content=answer),
+]
+
+new_messages[-1].pretty_print()
+graph.update_state(
+    # Which state to update
+    config,
+    # The updated values to provide. The messages in our `State` are "append-only", meaning this will be appended
+    # to the existing state. We will review how to update existing messages in the next section!
+    {"messages": new_messages},
+)
+
+print("\n\nLast 2 messages;")
+print(graph.get_state(config).values["messages"][-2:])
+================================== Ai Message ==================================
+
+LangGraph is a library for building stateful, multi-actor applications with LLMs.
+
+
+Last 2 messages;
+[ToolMessage(content='LangGraph is a library for building stateful, multi-actor applications with LLMs.', id='14589ef1-15db-4a75-82a6-d57c40a216d0', tool_call_id='toolu_01DTyDpJ1kKdNps5yxv3AGJd'), AIMessage(content='LangGraph is a library for building stateful, multi-actor applications with LLMs.', id='1c657bfb-7690-44c7-a26d-d0d22453013d')]
+Now the graph is complete, since we've provided the final response message! Since state updates simulate a graph step, they even generate corresponding traces. Inspec the LangSmith trace of the update_state call above to see what's going on.
+
+Notice that our new messages are appended to the messages already in the state. Remember how we defined the State type?
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+We annotated messages with the pre-built add_messages function. This instructs the graph to always append values to the existing list, rather than overwriting the list directly. The same logic is applied here, so the messages we passed to update_state were appended in the same way!
+
+The update_state function operates as if it were one of the nodes in your graph! By default, the update operation uses the node that was last executed, but you can manually specify it below. Let's add an update and tell the graph to treat it as if it came from the "chatbot".
+
+graph.update_state(
+    config,
+    {"messages": [AIMessage(content="I'm an AI expert!")]},
+    # Which node for this function to act as. It will automatically continue
+    # processing as if this node just ran.
+    as_node="chatbot",
+)
+{'configurable': {'thread_id': '1',
+  'thread_ts': '2024-05-06T22:27:57.350721+00:00'}}
+Check out the LangSmith trace for this update call at the provided link. Notice from the trace that the graph continues into the tools_condition edge. We just told the graph to treat the update as_node="chatbot". If we follow the diagram below and start from the chatbot node, we naturally end up in the tools_condition edge and then __end__ since our updated message lacks tool calls.
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Inspect the current state as before to confirm the checkpoint reflects our manual updates.
+
+snapshot = graph.get_state(config)
+print(snapshot.values["messages"][-3:])
+print(snapshot.next)
+[ToolMessage(content='LangGraph is a library for building stateful, multi-actor applications with LLMs.', id='14589ef1-15db-4a75-82a6-d57c40a216d0', tool_call_id='toolu_01DTyDpJ1kKdNps5yxv3AGJd'), AIMessage(content='LangGraph is a library for building stateful, multi-actor applications with LLMs.', id='1c657bfb-7690-44c7-a26d-d0d22453013d'), AIMessage(content="I'm an AI expert!", id='acd668e3-ba31-42c0-843c-00d0994d5885')]
+()
+Notice: that we've continued to add AI messages to the state. Since we are acting as the chatbot and responding with an AIMessage that doesn't contain tool_calls, the graph knows that it has entered a finished state (next is empty).
+
+What if you want to overwrite existing messages?
+The add_messages function we used to annotate our graph's State above controls how updates are made to the messages key. This function looks at any message IDs in the new messages list. If the ID matches a message in the existing state, add_messages overwrites the existing message with the new content.
+
+As an example, let's update the tool invocation to make sure we get good results from our search engine! First, start a new thread:
+
+user_input = "I'm learning LangGraph. Could you do some research on it for me?"
+config = {"configurable": {"thread_id": "2"}}  # we'll use thread_id = 2 here
+events = graph.stream(
+    {"messages": [("user", user_input)]}, config, stream_mode="values"
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+I'm learning LangGraph. Could you do some research on it for me?
+================================== Ai Message ==================================
+
+[{'id': 'toolu_013MvjoDHnv476ZGzyPFZhrR', 'input': {'query': 'LangGraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Tool Calls:
+  tavily_search_results_json (toolu_013MvjoDHnv476ZGzyPFZhrR)
+ Call ID: toolu_013MvjoDHnv476ZGzyPFZhrR
+  Args:
+    query: LangGraph
+Next, let's update the tool invocation for our agent. Maybe we want to search for human-in-the-loop workflows in particular.
+
+from langchain_core.messages import AIMessage
+
+snapshot = graph.get_state(config)
+existing_message = snapshot.values["messages"][-1]
+print("Original")
+print("Message ID", existing_message.id)
+print(existing_message.tool_calls[0])
+new_tool_call = existing_message.tool_calls[0].copy()
+new_tool_call["args"]["query"] = "LangGraph human-in-the-loop workflow"
+new_message = AIMessage(
+    content=existing_message.content,
+    tool_calls=[new_tool_call],
+    # Important! The ID is how LangGraph knows to REPLACE the message in the state rather than APPEND this messages
+    id=existing_message.id,
+)
+
+print("Updated")
+print(new_message.tool_calls[0])
+print("Message ID", new_message.id)
+graph.update_state(config, {"messages": [new_message]})
+
+print("\n\nTool calls")
+graph.get_state(config).values["messages"][-1].tool_calls
+Original
+Message ID run-59283969-1076-45fe-bee8-ebfccab163c3-0
+{'name': 'tavily_search_results_json', 'args': {'query': 'LangGraph'}, 'id': 'toolu_013MvjoDHnv476ZGzyPFZhrR'}
+Updated
+{'name': 'tavily_search_results_json', 'args': {'query': 'LangGraph human-in-the-loop workflow'}, 'id': 'toolu_013MvjoDHnv476ZGzyPFZhrR'}
+Message ID run-59283969-1076-45fe-bee8-ebfccab163c3-0
+
+
+Tool calls
+[{'name': 'tavily_search_results_json',
+  'args': {'query': 'LangGraph human-in-the-loop workflow'},
+  'id': 'toolu_013MvjoDHnv476ZGzyPFZhrR'}]
+Notice that we've modified the AI's tool invocation to search for "LangGraph human-in-the-loop workflow" instead of the simple "LangGraph".
+
+Check out the LangSmith trace to see the state update call - you can see our new message has successfully updated the previous AI message.
+
+Resume the graph by streaming with an input of None and the existing config.
+
+events = graph.stream(None, config, stream_mode="values")
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================= Tool Message =================================
+Name: tavily_search_results_json
+
+[{"url": "https://langchain-ai.github.io/langgraph/how-tos/human-in-the-loop/", "content": "Human-in-the-loop\u00b6 When creating LangGraph agents, it is often nice to add a human in the loop component. This can be helpful when giving them access to tools. ... from langgraph.graph import MessageGraph, END # Define a new graph workflow = MessageGraph # Define the two nodes we will cycle between workflow. add_node (\"agent\", call_model) ..."}, {"url": "https://langchain-ai.github.io/langgraph/how-tos/chat_agent_executor_with_function_calling/human-in-the-loop/", "content": "Human-in-the-loop. In this example we will build a ReAct Agent that has a human in the loop. We will use the human to approve specific actions. This examples builds off the base chat executor. It is highly recommended you learn about that executor before going through this notebook. You can find documentation for that example here."}]
+================================== Ai Message ==================================
+
+Based on the search results, LangGraph appears to be a framework for building AI agents that can interact with humans in a conversational way. The key points I gathered are:
+
+- LangGraph allows for "human-in-the-loop" workflows, where a human can be involved in approving or reviewing actions taken by the AI agent.
+- This can be useful for giving the AI agent access to various tools and capabilities, with the human able to provide oversight and guidance.
+- The framework includes components like "MessageGraph" for defining the conversational flow between the agent and human.
+
+Overall, LangGraph seems to be a way to create conversational AI agents that can leverage human input and guidance, rather than operating in a fully autonomous way. Let me know if you need any clarification or have additional questions!
+Check out the trace to see the tool call and later LLM response. Notice that now the graph queries the search engine using our updated query term - we were able to manually override the LLM's search here!
+
+All of this is reflected in the graph's checkpointed memory, meaning if we continue the conversation, it will recall all the modified state.
+
+events = graph.stream(
+    {
+        "messages": (
+            "user",
+            "Remember what I'm learning about?",
+        )
+    },
+    config,
+    stream_mode="values",
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+Remember what I'm learning about?
+================================== Ai Message ==================================
+
+Ah yes, now I remember - you mentioned earlier that you are learning about LangGraph.
+
+LangGraph is the framework I researched in my previous response, which is for building conversational AI agents that can incorporate human input and oversight.
+
+So based on our earlier discussion, it seems you are currently learning about and exploring the LangGraph system for creating human-in-the-loop AI agents. Please let me know if I have the right understanding now.
+Congratulations! You've used interrupt_before and update_state to manually modify the state as a part of a human-in-the-loop workflow. Interruptions and state modifications let you control how the agent behaves. Combined with persistent checkpointing, it means you can pause an action and resume at any point. Your user doesn't have to be available when the graph interrupts!
+
+The graph code for this section is identical to previous ones. The key snippets to remember are to add .compile(..., interrupt_before=[...]) (or interrupt_after) if you want to explicitly pause the graph whenever it reaches a node. Then you can use update_state to modify the checkpoint and control how the graph should proceed.
+
+Part 6: Customizing State
+So far, we've relied on a simple state (it's just a list of messages!). You can go far with this simple state, but if you want to define complex behavior without relying on the message list, you can add additional fields to the state. In this section, we will extend our chat bot with a new node to illustrate this.
+
+In the examples above, we involved a human deterministically: the graph always interrupted whenever an tool was invoked. Suppose we wanted our chat bot to have the choice of relying on a human.
+
+One way to do this is to create a passthrough "human" node, before which the graph will always stop. We will only execute this node if the LLM invokes a "human" tool. For our convenience, we will include an "ask_human" flag in our graph state that we will flip if the LLM calls this tool.
+
+Below, define this new graph, with an updated State
+
+from typing import Annotated
+
+from langchain_anthropic import ChatAnthropic
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import BaseMessage
+from typing_extensions import TypedDict
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    # This flag is new
+    ask_human: bool
+Next, define a schema to show the model to let it decide to request assistance.
+
+from langchain_core.pydantic_v1 import BaseModel
+
+
+class RequestAssistance(BaseModel):
+    """Escalate the conversation to an expert. Use this if you are unable to assist directly or if the user requires support beyond your permissions.
+
+    To use this function, relay the user's 'request' so the expert can provide the right guidance.
+    """
+
+    request: str
+Next, define the chatbot node. The primary modification here is flip the ask_human flag if we see that the chat bot has invoked the RequestAssistance flag.
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+# We can bind the llm to a tool definition, a pydantic model, or a json schema
+llm_with_tools = llm.bind_tools(tools + [RequestAssistance])
+
+
+def chatbot(state: State):
+    response = llm_with_tools.invoke(state["messages"])
+    ask_human = False
+    if (
+        response.tool_calls
+        and response.tool_calls[0]["name"] == RequestAssistance.__name__
+    ):
+        ask_human = True
+    return {"messages": [response], "ask_human": ask_human}
+/Users/wfh/code/lc/langchain/libs/core/langchain_core/_api/beta_decorator.py:87: LangChainBetaWarning: The method `ChatAnthropic.bind_tools` is in beta. It is actively being worked on, so the API may change.
+  warn_beta(
+Next, create the graph builder and add the chatbot and tools nodes to the graph, same as before.
+
+graph_builder = StateGraph(State)
+
+graph_builder.add_node("chatbot", chatbot)
+graph_builder.add_node("tools", ToolNode(tools=[tool]))
+Next, create the "human" node. This node function is mostly a placeholder in our graph that will trigger an interrupt. If the human does not manually update the state during the interrupt, it inserts a tool message so the LLM knows the user was requested but didn't respond. This node also unsets the ask_human flag so the graph knows not to revisit the node unless further requests are made.
+
+from langchain_core.messages import AIMessage, ToolMessage
+
+
+def create_response(response: str, ai_message: AIMessage):
+    return ToolMessage(
+        content=response,
+        tool_call_id=ai_message.tool_calls[0]["id"],
+    )
+
+
+def human_node(state: State):
+    new_messages = []
+    if not isinstance(state["messages"][-1], ToolMessage):
+        # Typically, the user will have updated the state during the interrupt.
+        # If they choose not to, we will include a placeholder ToolMessage to
+        # let the LLM continue.
+        new_messages.append(
+            create_response("No response from human.", state["messages"][-1])
+        )
+    return {
+        # Append the new messages
+        "messages": new_messages,
+        # Unset the flag
+        "ask_human": False,
+    }
+
+
+graph_builder.add_node("human", human_node)
+Next, define the conditional logic. The select_next_node will route to the human node if the flag is set. Otherwise, it lets the prebuilt tools_condition function choose the next node.
+
+Recall that the tools_condition function simply checks to see if the chatbot has responded with any tool_calls in its response message. If so, it routes to the action node. Otherwise, it ends the graph.
+
+def select_next_node(state: State):
+    if state["ask_human"]:
+        return "human"
+    # Otherwise, we can route as before
+    return tools_condition(state)
+
+
+graph_builder.add_conditional_edges(
+    "chatbot",
+    select_next_node,
+    {"human": "human", "tools": "tools", "__end__": "__end__"},
+)
+Finally, add the simple directed edges and compile the graph. These edges instruct the graph to always flow from node a->b whenever a finishes executing.
+
+# The rest is the same
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge("human", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+memory = MemorySaver()
+graph = graph_builder.compile(
+    checkpointer=memory,
+    # We interrupt before 'human' here instead.
+    interrupt_before=["human"],
+)
+If you have the visualization dependencies installed, you can see the graph structure below:
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+The chat bot can either request help from a human (chatbot->select->human), invoke the search engine tool (chatbot->select->action), or directly respond (chatbot->select->end). Once an action or request has been made, the graph will transition back to the chatbot node to continue operations.
+
+Let's see this graph in action. We will request for expert assistance to illustrate our graph.
+
+user_input = "I need some expert guidance for building this AI agent. Could you request assistance for me?"
+config = {"configurable": {"thread_id": "1"}}
+# The config is the **second positional argument** to stream() or invoke()!
+events = graph.stream(
+    {"messages": [("user", user_input)]}, config, stream_mode="values"
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+I need some expert guidance for building this AI agent. Could you request assistance for me?
+================================== Ai Message ==================================
+
+[{'id': 'toolu_017XaQuVsoAyfXeTfDyv55Pc', 'input': {'request': 'I need some expert guidance for building this AI agent.'}, 'name': 'RequestAssistance', 'type': 'tool_use'}]
+Tool Calls:
+  RequestAssistance (toolu_017XaQuVsoAyfXeTfDyv55Pc)
+ Call ID: toolu_017XaQuVsoAyfXeTfDyv55Pc
+  Args:
+    request: I need some expert guidance for building this AI agent.
+Notice: the LLM has invoked the "RequestAssistance" tool we provided it, and the interrupt has been set. Let's inspect the graph state to confirm.
+
+snapshot = graph.get_state(config)
+snapshot.next
+('human',)
+The graph state is indeed interrupted before the 'human' node. We can act as the "expert" in this scenario and manually update the state by adding a new ToolMessage with our input.
+
+Next, respond to the chatbot's request by:
+
+Creating a ToolMessage with our response. This will be passed back to the chatbot.
+Calling update_state to manually update the graph state.
+ai_message = snapshot.values["messages"][-1]
+human_response = (
+    "We, the experts are here to help! We'd recommend you check out LangGraph to build your agent."
+    " It's much more reliable and extensible than simple autonomous agents."
+)
+tool_message = create_response(human_response, ai_message)
+graph.update_state(config, {"messages": [tool_message]})
+{'configurable': {'thread_id': '1',
+  'thread_ts': '2024-05-06T22:31:39.973392+00:00'}}
+You can inspect the state to confirm our response was added.
+
+graph.get_state(config).values["messages"]
+[HumanMessage(content='I need some expert guidance for building this AI agent. Could you request assistance for me?', id='ab75eb9d-cce7-4e44-8de7-b0b375a86972'),
+ AIMessage(content=[{'id': 'toolu_017XaQuVsoAyfXeTfDyv55Pc', 'input': {'request': 'I need some expert guidance for building this AI agent.'}, 'name': 'RequestAssistance', 'type': 'tool_use'}], response_metadata={'id': 'msg_0199PiK6kmVAbeo1qmephKDq', 'model': 'claude-3-haiku-20240307', 'stop_reason': 'tool_use', 'stop_sequence': None, 'usage': {'input_tokens': 486, 'output_tokens': 63}}, id='run-ff07f108-5055-4343-8910-2fa40ead3fb9-0', tool_calls=[{'name': 'RequestAssistance', 'args': {'request': 'I need some expert guidance for building this AI agent.'}, 'id': 'toolu_017XaQuVsoAyfXeTfDyv55Pc'}]),
+ ToolMessage(content="We, the experts are here to help! We'd recommend you check out LangGraph to build your agent. It's much more reliable and extensible than simple autonomous agents.", id='19f2eb9f-a742-46aa-9047-60909c30e64a', tool_call_id='toolu_017XaQuVsoAyfXeTfDyv55Pc')]
+Next, resume the graph by invoking it with None as the inputs.
+
+events = graph.stream(None, config, stream_mode="values")
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================= Tool Message =================================
+
+We, the experts are here to help! We'd recommend you check out LangGraph to build your agent. It's much more reliable and extensible than simple autonomous agents.
+================================== Ai Message ==================================
+
+It looks like the experts have provided some guidance on how to build your AI agent. They suggested checking out LangGraph, which they say is more reliable and extensible than simple autonomous agents. Please let me know if you need any other assistance - I'm happy to help coordinate with the expert team further.
+Notice that the chat bot has incorporated the updated state in its final response. Since everything was checkpointed, the "expert" human in the loop could perform the update at any time without impacting the graph's execution.
+
+Congratulations! you've now added an additional node to your assistant graph to let the chat bot decide for itself whether or not it needs to interrupt execution. You did so by updating the graph State with a new ask_human field and modifying the interruption logic when compiling the graph. This lets you dynamically include a human in the loop while maintaining full memory every time you execute the graph.
+
+We're almost done with the tutorial, but there is one more concept we'd like to review before finishing that connects checkpointing and state updates.
+
+This section's code is reproduced below for your reference.
+
+Full Code
+Part 7: Time Travel
+In a typical chat bot workflow, the user interacts with the bot 1 or more times to accomplish a task. In the previous sections, we saw how to add memory and a human-in-the-loop to be able to checkpoint our graph state and manually override the state to control future responses.
+
+But what if you want to let your user start from a previous response and "branch off" to explore a separate outcome? Or what if you want users to be able to "rewind" your assistant's work to fix some mistakes or try a different strategy (common in applications like autonomous software engineers)?
+
+You can create both of these experiences and more using LangGraph's built-in "time travel" functionality.
+
+In this section, you will "rewind" your graph by fetching a checkpoint using the graph's get_state_history method. You can then resume execution at this previous point in time.
+
+First, recall our chatbot graph. We don't need to make any changes from before:
+
+from typing import Annotated, Literal
+
+from langchain_anthropic import ChatAnthropic
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.pydantic_v1 import BaseModel
+from typing_extensions import TypedDict
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    # This flag is new
+    ask_human: bool
+
+
+class RequestAssistance(BaseModel):
+    """Escalate the conversation to an expert. Use this if you are unable to assist directly or if the user requires support beyond your permissions.
+
+    To use this function, relay the user's 'request' so the expert can provide the right guidance.
+    """
+
+    request: str
+
+
+tool = TavilySearchResults(max_results=2)
+tools = [tool]
+llm = ChatAnthropic(model="claude-3-haiku-20240307")
+# We can bind the llm to a tool definition, a pydantic model, or a json schema
+llm_with_tools = llm.bind_tools(tools + [RequestAssistance])
+
+
+def chatbot(state: State):
+    response = llm_with_tools.invoke(state["messages"])
+    ask_human = False
+    if (
+        response.tool_calls
+        and response.tool_calls[0]["name"] == RequestAssistance.__name__
+    ):
+        ask_human = True
+    return {"messages": [response], "ask_human": ask_human}
+
+
+graph_builder = StateGraph(State)
+
+graph_builder.add_node("chatbot", chatbot)
+graph_builder.add_node("tools", ToolNode(tools=[tool]))
+
+
+def create_response(response: str, ai_message: AIMessage):
+    return ToolMessage(
+        content=response,
+        tool_call_id=ai_message.tool_calls[0]["id"],
+    )
+
+
+def human_node(state: State):
+    new_messages = []
+    if not isinstance(state["messages"][-1], ToolMessage):
+        # Typically, the user will have updated the state during the interrupt.
+        # If they choose not to, we will include a placeholder ToolMessage to
+        # let the LLM continue.
+        new_messages.append(
+            create_response("No response from human.", state["messages"][-1])
+        )
+    return {
+        # Append the new messages
+        "messages": new_messages,
+        # Unset the flag
+        "ask_human": False,
+    }
+
+
+graph_builder.add_node("human", human_node)
+
+
+def select_next_node(state: State) -> Literal["human", "tools", "__end__"]:
+    if state["ask_human"]:
+        return "human"
+    # Otherwise, we can route as before
+    return tools_condition(state)
+
+
+graph_builder.add_conditional_edges(
+    "chatbot",
+    select_next_node,
+    {"human": "human", "tools": "tools", "__end__": "__end__"},
+)
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge("human", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+memory = MemorySaver()
+graph = graph_builder.compile(
+    checkpointer=memory,
+    interrupt_before=["human"],
+)
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Let's have our graph take a couple steps. Every step will be checkpointed in its state history:
+
+config = {"configurable": {"thread_id": "1"}}
+events = graph.stream(
+    {
+        "messages": [
+            ("user", "I'm learning LangGraph. Could you do some research on it for me?")
+        ]
+    },
+    config,
+    stream_mode="values",
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+I'm learning LangGraph. Could you do some research on it for me?
+================================== Ai Message ==================================
+
+[{'text': "Okay, let me look into LangGraph for you. Here's what I found:", 'type': 'text'}, {'id': 'toolu_011AQ2FT4RupVka2LVMV3Gci', 'input': {'query': 'LangGraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Tool Calls:
+  tavily_search_results_json (toolu_011AQ2FT4RupVka2LVMV3Gci)
+ Call ID: toolu_011AQ2FT4RupVka2LVMV3Gci
+  Args:
+    query: LangGraph
+================================= Tool Message =================================
+Name: tavily_search_results_json
+
+[{"url": "https://langchain-ai.github.io/langgraph/", "content": "LangGraph is framework agnostic (each node is a regular python function). It extends the core Runnable API (shared interface for streaming, async, and batch calls) to make it easy to: Seamless state management across multiple turns of conversation or tool usage. The ability to flexibly route between nodes based on dynamic criteria."}, {"url": "https://blog.langchain.dev/langgraph-multi-agent-workflows/", "content": "As a part of the launch, we highlighted two simple runtimes: one that is the equivalent of the AgentExecutor in langchain, and a second that was a version of that aimed at message passing and chat models.\n It's important to note that these three examples are only a few of the possible examples we could highlight - there are almost assuredly other examples out there and we look forward to seeing what the community comes up with!\n LangGraph: Multi-Agent Workflows\nLinks\nLast week we highlighted LangGraph - a new package (available in both Python and JS) to better enable creation of LLM workflows containing cycles, which are a critical component of most agent runtimes. \"\nAnother key difference between Autogen and LangGraph is that LangGraph is fully integrated into the LangChain ecosystem, meaning you take fully advantage of all the LangChain integrations and LangSmith observability.\n As part of this launch, we're also excited to highlight a few applications built on top of LangGraph that utilize the concept of multiple agents.\n"}]
+================================== Ai Message ==================================
+
+Based on the search results, here's what I've learned about LangGraph:
+
+- LangGraph is a framework-agnostic tool that extends the Runnable API to make it easier to manage state and routing between different nodes or agents in a conversational workflow. 
+
+- It's part of the LangChain ecosystem, so it integrates with other LangChain tools and observability features.
+
+- LangGraph enables the creation of multi-agent workflows, where you can have different "nodes" or agents that can communicate and pass information to each other.
+
+- This allows for more complex conversational flows and the ability to chain together different capabilities, tools, or models.
+
+- The key benefits seem to be around state management, flexible routing between agents, and the ability to create more sophisticated and dynamic conversational workflows.
+
+Let me know if you need any clarification or have additional questions! I'm happy to do more research on LangGraph if you need further details.
+events = graph.stream(
+    {
+        "messages": [
+            ("user", "Ya that's helpful. Maybe I'll build an autonomous agent with it!")
+        ]
+    },
+    config,
+    stream_mode="values",
+)
+for event in events:
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+Ya that's helpful. Maybe I'll build an autonomous agent with it!
+================================== Ai Message ==================================
+
+[{'text': "That's great that you're interested in building an autonomous agent using LangGraph! Here are a few additional thoughts on how you could approach that:", 'type': 'text'}, {'id': 'toolu_01L3V9FhZG5Qx9jqRGfWGtS2', 'input': {'query': 'building autonomous agents with langgraph'}, 'name': 'tavily_search_results_json', 'type': 'tool_use'}]
+Tool Calls:
+  tavily_search_results_json (toolu_01L3V9FhZG5Qx9jqRGfWGtS2)
+ Call ID: toolu_01L3V9FhZG5Qx9jqRGfWGtS2
+  Args:
+    query: building autonomous agents with langgraph
+================================= Tool Message =================================
+Name: tavily_search_results_json
+
+[{"url": "https://github.com/langchain-ai/langgraphjs", "content": "LangGraph is a library for building stateful, multi-actor applications with LLMs, built on top of (and intended to be used with) LangChain.js.It extends the LangChain Expression Language with the ability to coordinate multiple chains (or actors) across multiple steps of computation in a cyclic manner. It is inspired by Pregel and Apache Beam.The current interface exposed is one inspired by ..."}, {"url": "https://github.com/langchain-ai/langgraph", "content": "LangGraph is a library for building stateful, multi-actor applications with LLMs. It extends the LangChain Expression Language with the ability to coordinate multiple chains (or actors) across multiple steps of computation in a cyclic manner. It is inspired by Pregel and Apache Beam.The current interface exposed is one inspired by NetworkX.. The main use is for adding cycles to your LLM ..."}]
+================================== Ai Message ==================================
+
+The key things to keep in mind:
+
+1. LangGraph is designed to help coordinate multiple "agents" or "actors" that can pass information back and forth. This allows you to build more complex, multi-step workflows.
+
+2. You'll likely want to define different nodes or agents that handle specific tasks or capabilities. LangGraph makes it easy to route between these agents based on the state of the conversation.
+
+3. Make sure to leverage the LangChain ecosystem - things like prompts, memory, agents, tools etc. LangGraph integrates with these to give you a powerful set of building blocks.
+
+4. Pay close attention to state management - LangGraph helps you manage state across multiple interactions, which is crucial for an autonomous agent.
+
+5. Consider how you'll handle things like user intent, context, and goal-driven behavior. LangGraph gives you the flexibility to implement these kinds of complex behaviors.
+
+Let me know if you have any other specific questions as you start prototyping your autonomous agent! I'm happy to provide more guidance.
+Now that we've had the agent take a couple steps, we can replay the full state history to see everything that occurred.
+
+to_replay = None
+for state in graph.get_state_history(config):
+    print("Num Messages: ", len(state.values["messages"]), "Next: ", state.next)
+    print("-" * 80)
+    if len(state.values["messages"]) == 6:
+        # We are somewhat arbitrarily selecting a specific state based on the number of chat messages in the state.
+        to_replay = state
+Num Messages:  8 Next:  ()
+--------------------------------------------------------------------------------
+Num Messages:  7 Next:  ('chatbot',)
+--------------------------------------------------------------------------------
+Num Messages:  6 Next:  ('action',)
+--------------------------------------------------------------------------------
+Num Messages:  5 Next:  ('chatbot',)
+--------------------------------------------------------------------------------
+Num Messages:  4 Next:  ()
+--------------------------------------------------------------------------------
+Num Messages:  3 Next:  ('chatbot',)
+--------------------------------------------------------------------------------
+Num Messages:  2 Next:  ('action',)
+--------------------------------------------------------------------------------
+Num Messages:  1 Next:  ('chatbot',)
+--------------------------------------------------------------------------------
+Notice that checkpoints are saved for every step of the graph. This spans invocations so you can rewind across a full thread's history. We've picked out to_replay as a state to resume from. This is the state after the chatbot node in the second graph invocation above.
+
+Resuming from this point should call the action node next.
+
+print(to_replay.next)
+print(to_replay.config)
+('action',)
+{'configurable': {'thread_id': '1', 'thread_ts': '2024-05-06T22:33:10.211424+00:00'}}
+Notice that the checkpoint's config (to_replay.config) contains a thread_ts timestamp. Providing this thread_ts value tells LangGraph's checkpointer to load the state from that moment in time. Let's try it below:
+
+# The `thread_ts` in the `to_replay.config` corresponds to a state we've persisted to our checkpointer.
+for event in graph.stream(None, to_replay.config, stream_mode="values"):
+    if "messages" in event:
+        event["messages"][-1].pretty_print()
+================================= Tool Message =================================
+Name: tavily_search_results_json
+
+[{"url": "https://valentinaalto.medium.com/getting-started-with-langgraph-66388e023754", "content": "Sign up\nSign in\nSign up\nSign in\nMember-only story\nGetting Started with LangGraph\nBuilding multi-agents application with graph frameworks\nValentina Alto\nFollow\n--\nShare\nOver the last year, LangChain has established itself as one of the most popular AI framework available in the market. This new library, introduced in January\u2026\n--\n--\nWritten by Valentina Alto\nData&AI Specialist at @Microsoft | MSc in Data Science | AI, Machine Learning and Running enthusiast\nHelp\nStatus\nAbout\nCareers\nBlog\nPrivacy\nTerms\nText to speech\nTeams Since the concept of multi-agent applications \u2014 the ones exhibiting different agents, each having a specific personality and tools to access \u2014 is getting real and mainstream (see the rise of libraries projects like AutoGen), LangChain\u2019s developers introduced a new library to make it easier to manage these kind of agentic applications. Nevertheless, those chains were lacking the capability of introducing cycles into their runtime, meaning that there is no out-of-the-box framework to enable the LLM to reason over the next best action in a kind of for-loop scenario. The main feature of LangChain \u2014 as the name suggests \u2014 is its ability to easily create the so-called chains."}, {"url": "https://blog.langchain.dev/langgraph-multi-agent-workflows/", "content": "As a part of the launch, we highlighted two simple runtimes: one that is the equivalent of the AgentExecutor in langchain, and a second that was a version of that aimed at message passing and chat models.\n It's important to note that these three examples are only a few of the possible examples we could highlight - there are almost assuredly other examples out there and we look forward to seeing what the community comes up with!\n LangGraph: Multi-Agent Workflows\nLinks\nLast week we highlighted LangGraph - a new package (available in both Python and JS) to better enable creation of LLM workflows containing cycles, which are a critical component of most agent runtimes. \"\nAnother key difference between Autogen and LangGraph is that LangGraph is fully integrated into the LangChain ecosystem, meaning you take fully advantage of all the LangChain integrations and LangSmith observability.\n As part of this launch, we're also excited to highlight a few applications built on top of LangGraph that utilize the concept of multiple agents.\n"}]
+================================== Ai Message ==================================
+
+The key things I gathered are:
+
+- LangGraph is well-suited for building multi-agent applications, where you have different agents with their own capabilities, tools, and personality.
+
+- It allows you to create more complex workflows with cycles and feedback loops, which is critical for building autonomous agents that can reason about their next best actions.
+
+- The integration with LangChain means you can leverage other useful features like state management, observability, and integrations with various language models and data sources.
+
+Some tips for building an autonomous agent with LangGraph:
+
+1. Define the different agents/nodes in your workflow and their specific responsibilities/capabilities.
+2. Set up the connections and routing between the agents so they can pass information and decisions back and forth.
+3. Implement logic within each agent to assess the current state and determine the optimal next action.
+4. Use LangChain features like memory and toolkits to give your agents access to relevant information and abilities.
+5. Monitor the overall system behavior and iteratively improve the agent interactions and decision-making.
+
+Let me know if you have any other questions! I'm happy to provide more guidance as you start building your autonomous agent with LangGraph.
+Notice that the graph resumed execution from the **action** node. You can tell this is the case since the first value printed above is the response from our search engine tool.
+
+Congratulations! You've now used time-travel checkpoint traversal in LangGraph. Being able to rewind and explore alternative paths opens up a world of possibilities for debugging, experimentation, and interactive applications.
+
+Conclusion
+Congrats! You've completed the intro tutorial and built a chat bot in LangGraph that supports tool calling, persistent memory, human-in-the-loop interactivity, and even time-travel!
+
+The LangGraph documentation is a great resource for diving deeper into the library's capabilities.
+
+How to create subgraphs
+For more complex systems, sub-graphs are a useful design principle. Sub-graphs allow you to create and manage different states in different parts of your graph. This allows you build things like multi-agent teams, where each team can track its own separate state.
+
+Screenshot 2024-07-11 at 1.01.28 PM.png
+
+%%capture --no-stderr
+%pip install -U langgraph
+Simple example
+Let's consider a toy example: I have a system that accepts logs and perform two separate sub-tasks. First, it will summarize them. Second, it will summarize any failure modes captured in the logs. I want to perform these two operations in two different sub-graphs.
+
+The most important thing to recognize is the information transfer between the graphs. Entry Graph is the parent, and each of the two sub-graphs are defined as nodes in Entry Graph. Both subgraphs inherit state from the parent Entry Graph; I can access docs in each of the sub-graphs simply by specifying it in the sub-graph state (see diagram). Each subgraph can have its own private state. And any values that I want propagated back to the parent Entry Graph (for final reporting) simply need to be defined in my Entry Graph state (e.g., summary report and failure report).
+
+Screenshot 2024-07-12 at 10.35.41 AM.png
+
+from operator import add
+from typing import List, TypedDict, Optional, Annotated, Dict
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START, END
+
+
+# The structure of the logs
+class Logs(TypedDict):
+    id: str
+    question: str
+    docs: Optional[List]
+    answer: str
+    grade: Optional[int]
+    grader: Optional[str]
+    feedback: Optional[str]
+
+
+# Failure Analysis Sub-graph
+class FailureAnalysisState(TypedDict):
+    docs: List[Logs]
+    failures: List[Logs]
+    fa_summary: str
+
+
+def get_failures(state):
+    docs = state["docs"]
+    failures = [doc for doc in docs if "grade" in doc]
+    return {"failures": failures}
+
+
+def generate_summary(state):
+    failures = state["failures"]
+    # Add fxn: fa_summary = summarize(failures)
+    fa_summary = "Poor quality retrieval of Chroma documentation."
+    return {"fa_summary": fa_summary}
+
+
+fa_builder = StateGraph(FailureAnalysisState)
+fa_builder.add_node("get_failures", get_failures)
+fa_builder.add_node("generate_summary", generate_summary)
+fa_builder.add_edge(START, "get_failures")
+fa_builder.add_edge("get_failures", "generate_summary")
+fa_builder.add_edge("generate_summary", END)
+
+
+# Summarization subgraph
+class QuestionSummarizationState(TypedDict):
+    docs: List[Logs]
+    qs_summary: str
+    report: str
+
+
+def generate_summary(state):
+    docs = state["docs"]
+    # Add fxn: summary = summarize(docs)
+    summary = "Questions focused on usage of ChatOllama and Chroma vector store."
+    return {"qs_summary": summary}
+
+
+def send_to_slack(state):
+    qs_summary = state["qs_summary"]
+    # Add fxn: report = report_generation(qs_summary)
+    report = "foo bar baz"
+    return {"report": report}
+
+
+def format_report_for_slack(state):
+    report = state["report"]
+    # Add fxn: formatted_report = report_format(report)
+    formatted_report = "foo bar"
+    return {"report": formatted_report}
+
+
+qs_builder = StateGraph(QuestionSummarizationState)
+qs_builder.add_node("generate_summary", generate_summary)
+qs_builder.add_node("send_to_slack", send_to_slack)
+qs_builder.add_node("format_report_for_slack", format_report_for_slack)
+qs_builder.add_edge(START, "generate_summary")
+qs_builder.add_edge("generate_summary", "send_to_slack")
+qs_builder.add_edge("send_to_slack", "format_report_for_slack")
+qs_builder.add_edge("format_report_for_slack", END)
+Note that each sub-graph has its own state, QuestionSummarizationState and FailureAnalysisState.
+
+After defining each sub-graph, we put everything together.
+
+# Dummy logs
+question_answer = Logs(
+    id="1",
+    question="How can I import ChatOllama?",
+    answer="To import ChatOllama, use: 'from langchain_community.chat_models import ChatOllama.'",
+)
+
+question_answer_feedback = Logs(
+    id="2",
+    question="How can I use Chroma vector store?",
+    answer="To use Chroma, define: rag_chain = create_retrieval_chain(retriever, question_answer_chain).",
+    grade=0,
+    grader="Document Relevance Recall",
+    feedback="The retrieved documents discuss vector stores in general, but not Chroma specifically",
+)
+
+
+# Entry Graph
+class EntryGraphState(TypedDict):
+    raw_logs: Annotated[List[Dict], add]
+    docs: Annotated[List[Logs], add]  # This will be used in sub-graphs
+    fa_summary: str  # This will be generated in the FA sub-graph
+    report: str  # This will be generated in the QS sub-graph
+
+
+def convert_logs_to_docs(state):
+    # Get logs
+    raw_logs = state["raw_logs"]
+    docs = [question_answer, question_answer_feedback]
+    return {"docs": docs}
+
+
+entry_builder = StateGraph(EntryGraphState)
+entry_builder.add_node("convert_logs_to_docs", convert_logs_to_docs)
+entry_builder.add_node("question_summarization", qs_builder.compile())
+entry_builder.add_node("failure_analysis", fa_builder.compile())
+
+entry_builder.add_edge(START, "convert_logs_to_docs")
+entry_builder.add_edge("convert_logs_to_docs", "failure_analysis")
+entry_builder.add_edge("convert_logs_to_docs", "question_summarization")
+entry_builder.add_edge("failure_analysis", END)
+entry_builder.add_edge("question_summarization", END)
+
+graph = entry_builder.compile()
+
+from IPython.display import Image, display
+
+# Setting xray to 1 will show the internal structure of the nested graph
+display(Image(graph.get_graph(xray=1).draw_mermaid_png()))
+No description has been provided for this image
+raw_logs = [{"foo": "bar"}, {"foo": "baz"}]
+graph.invoke({"raw_logs": raw_logs}, debug=False)
+{'raw_logs': [{'foo': 'bar'}, {'foo': 'baz'}],
+ 'docs': [{'id': '1',
+   'question': 'How can I import ChatOllama?',
+   'answer': "To import ChatOllama, use: 'from langchain_community.chat_models import ChatOllama.'"},
+  {'id': '2',
+   'question': 'How can I use Chroma vector store?',
+   'answer': 'To use Chroma, define: rag_chain = create_retrieval_chain(retriever, question_answer_chain).',
+   'grade': 0,
+   'grader': 'Document Relevance Recall',
+   'feedback': 'The retrieved documents discuss vector stores in general, but not Chroma specifically'},
+  {'id': '1',
+   'question': 'How can I import ChatOllama?',
+   'answer': "To import ChatOllama, use: 'from langchain_community.chat_models import ChatOllama.'"},
+  {'id': '2',
+   'question': 'How can I use Chroma vector store?',
+   'answer': 'To use Chroma, define: rag_chain = create_retrieval_chain(retriever, question_answer_chain).',
+   'grade': 0,
+   'grader': 'Document Relevance Recall',
+   'feedback': 'The retrieved documents discuss vector stores in general, but not Chroma specifically'},
+  {'id': '1',
+   'question': 'How can I import ChatOllama?',
+   'answer': "To import ChatOllama, use: 'from langchain_community.chat_models import ChatOllama.'"},
+  {'id': '2',
+   'question': 'How can I use Chroma vector store?',
+   'answer': 'To use Chroma, define: rag_chain = create_retrieval_chain(retriever, question_answer_chain).',
+   'grade': 0,
+   'grader': 'Document Relevance Recall',
+   'feedback': 'The retrieved documents discuss vector stores in general, but not Chroma specifically'}],
+ 'fa_summary': 'Poor quality retrieval of Chroma documentation.',
+ 'report': 'foo bar'}
+Custom reducer functions to manage state
+Now, let's highlight a possible stumbling block when we use the same State across multiple sub-graphs.
+
+We will create two graphs: a parent graph with a few nodes and a child graph that is added as a node in the parent.
+
+We define a custom reducer function for our state.
+
+from typing import Annotated
+
+from typing_extensions import TypedDict
+
+
+def reduce_list(left: list | None, right: list | None) -> list:
+    if not left:
+        left = []
+    if not right:
+        right = []
+    return left + right
+
+
+class ChildState(TypedDict):
+    name: str
+    path: Annotated[list[str], reduce_list]
+
+
+class ParentState(TypedDict):
+    name: str
+    path: Annotated[list[str], reduce_list]
+
+
+child_builder = StateGraph(ChildState)
+
+child_builder.add_node("child_start", lambda state: {"path": ["child_start"]})
+child_builder.add_edge(START, "child_start")
+child_builder.add_node("child_middle", lambda state: {"path": ["child_middle"]})
+child_builder.add_node("child_end", lambda state: {"path": ["child_end"]})
+child_builder.add_edge("child_start", "child_middle")
+child_builder.add_edge("child_middle", "child_end")
+child_builder.add_edge("child_end", END)
+
+builder = StateGraph(ParentState)
+
+builder.add_node("grandparent", lambda state: {"path": ["grandparent"]})
+builder.add_edge(START, "grandparent")
+builder.add_node("parent", lambda state: {"path": ["parent"]})
+builder.add_node("child", child_builder.compile())
+builder.add_node("sibling", lambda state: {"path": ["sibling"]})
+builder.add_node("fin", lambda state: {"path": ["fin"]})
+
+# Add connections
+builder.add_edge("grandparent", "parent")
+builder.add_edge("parent", "child")
+builder.add_edge("parent", "sibling")
+builder.add_edge("child", "fin")
+builder.add_edge("sibling", "fin")
+builder.add_edge("fin", END)
+graph = builder.compile()
+from IPython.display import Image, display
+
+# Setting xray to 1 will show the internal structure of the nested graph
+display(Image(graph.get_graph(xray=1).draw_mermaid_png()))
+No description has been provided for this image
+graph.invoke({"name": "test"}, debug=True)
+[0:tasks] Starting step 0 with 1 task:
+- __start__ -> {'name': 'test'}
+[0:writes] Finished step 0 with writes to 1 channel:
+- name -> 'test'
+[0:checkpoint] State at the end of step 0:
+{'name': 'test', 'path': []}
+[1:tasks] Starting step 1 with 1 task:
+- grandparent -> {'name': 'test', 'path': []}
+[1:writes] Finished step 1 with writes to 1 channel:
+- path -> ['grandparent']
+[1:checkpoint] State at the end of step 1:
+{'name': 'test', 'path': ['grandparent']}
+[2:tasks] Starting step 2 with 1 task:
+- parent -> {'name': 'test', 'path': ['grandparent']}
+[2:writes] Finished step 2 with writes to 1 channel:
+- path -> ['parent']
+[2:checkpoint] State at the end of step 2:
+{'name': 'test', 'path': ['grandparent', 'parent']}
+[3:tasks] Starting step 3 with 2 tasks:
+- child -> {'name': 'test', 'path': ['grandparent', 'parent']}
+- sibling -> {'name': 'test', 'path': ['grandparent', 'parent']}
+[3:writes] Finished step 3 with writes to 2 channels:
+- name -> 'test'
+- path -> ['grandparent', 'parent', 'child_start', 'child_middle', 'child_end'], ['sibling']
+[3:checkpoint] State at the end of step 3:
+{'name': 'test',
+ 'path': ['grandparent',
+          'parent',
+          'grandparent',
+          'parent',
+          'child_start',
+          'child_middle',
+          'child_end',
+          'sibling']}
+[4:tasks] Starting step 4 with 1 task:
+- fin -> {'name': 'test',
+ 'path': ['grandparent',
+          'parent',
+          'grandparent',
+          'parent',
+          'child_start',
+          'child_middle',
+          'child_end',
+          'sibling']}
+[4:writes] Finished step 4 with writes to 1 channel:
+- path -> ['fin']
+[4:checkpoint] State at the end of step 4:
+{'name': 'test',
+ 'path': ['grandparent',
+          'parent',
+          'grandparent',
+          'parent',
+          'child_start',
+          'child_middle',
+          'child_end',
+          'sibling',
+          'fin']}
+{'name': 'test',
+ 'path': ['grandparent',
+  'parent',
+  'grandparent',
+  'parent',
+  'child_start',
+  'child_middle',
+  'child_end',
+  'sibling',
+  'fin']}
+Notice here that the ["grandparent", "parent"] sequence is duplicated!
+
+This is because our child state has received the full parent state and returns the full parent state once it terminates.
+
+To avoid duplication or conflicts in state, you typically would do one or more of the following:
+
+Handle duplicates in your reducer function.
+Call the child graph from within a python function. In that function, handle the state as needed.
+Update the child graph keys to avoid conflicts. You would still need to ensure the output can be interpreted by the parent, however.
+Let's re-implement the graph using technique (1) and add unique IDs for every value in the list. This is what is done in MessageGraph.
+
+import uuid
+
+
+def reduce_list(left: list | None, right: list | None) -> list:
+    """Append the right-hand list, replacing any elements with the same id in the left-hand list."""
+    if not left:
+        left = []
+    if not right:
+        right = []
+    left_, right_ = [], []
+    for orig, new in [(left, left_), (right, right_)]:
+        for val in orig:
+            if not isinstance(val, dict):
+                val = {"val": val}
+            if "id" not in val:
+                val["id"] = str(uuid.uuid4())
+            new.append(val)
+    # Merge the two lists
+    left_idx_by_id = {val["id"]: i for i, val in enumerate(left_)}
+    merged = left_.copy()
+    for val in right_:
+        if (existing_idx := left_idx_by_id.get(val["id"])) is not None:
+            merged[existing_idx] = val
+        else:
+            merged.append(val)
+    return merged
+
+
+class ChildState(TypedDict):
+    name: str
+    path: Annotated[list[str], reduce_list]
+
+
+class ParentState(TypedDict):
+    name: str
+    path: Annotated[list[str], reduce_list]
+child_builder = StateGraph(ChildState)
+
+child_builder.add_node("child_start", lambda state: {"path": ["child_start"]})
+child_builder.add_edge(START, "child_start")
+child_builder.add_node("child_middle", lambda state: {"path": ["child_middle"]})
+child_builder.add_node("child_end", lambda state: {"path": ["child_end"]})
+child_builder.add_edge("child_start", "child_middle")
+child_builder.add_edge("child_middle", "child_end")
+child_builder.add_edge("child_end", END)
+
+builder = StateGraph(ParentState)
+
+builder.add_node("grandparent", lambda state: {"path": ["grandparent"]})
+builder.add_edge(START, "grandparent")
+builder.add_node("parent", lambda state: {"path": ["parent"]})
+builder.add_node("child", child_builder.compile())
+builder.add_node("sibling", lambda state: {"path": ["sibling"]})
+builder.add_node("fin", lambda state: {"path": ["fin"]})
+
+# Add connections
+builder.add_edge("grandparent", "parent")
+builder.add_edge("parent", "child")
+builder.add_edge("parent", "sibling")
+builder.add_edge("child", "fin")
+builder.add_edge("sibling", "fin")
+builder.add_edge("fin", END)
+graph = builder.compile()
+from IPython.display import Image, display
+
+# Setting xray to 1 will show the internal structure of the nested graph
+display(Image(graph.get_graph(xray=1).draw_mermaid_png()))
+No description has been provided for this image
+graph.invoke({"name": "test"}, debug=True)
+[0:tasks] Starting step 0 with 1 task:
+- __start__ -> {'name': 'test'}
+[0:writes] Finished step 0 with writes to 1 channel:
+- name -> 'test'
+[0:checkpoint] State at the end of step 0:
+{'name': 'test', 'path': []}
+[1:tasks] Starting step 1 with 1 task:
+- grandparent -> {'name': 'test', 'path': []}
+[1:writes] Finished step 1 with writes to 1 channel:
+- path -> ['grandparent']
+[1:checkpoint] State at the end of step 1:
+{'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'}]}
+[2:tasks] Starting step 2 with 1 task:
+- parent -> {'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'}]}
+[2:writes] Finished step 2 with writes to 1 channel:
+- path -> ['parent']
+[2:checkpoint] State at the end of step 2:
+{'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'}]}
+[3:tasks] Starting step 3 with 2 tasks:
+- child -> {'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'}]}
+- sibling -> {'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'}]}
+[3:writes] Finished step 3 with writes to 2 channels:
+- name -> 'test'
+- path -> [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+ {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'},
+ {'id': 'd1c1bab0-6e19-4846-a470-e9cc2eb85088', 'val': 'child_start'},
+ {'id': 'e0fcb647-1e9e-4ae4-b560-0046515d5783', 'val': 'child_middle'},
+ {'id': '669dd810-360f-4694-a9f3-49597f23376a', 'val': 'child_end'}], ['sibling']
+[3:checkpoint] State at the end of step 3:
+{'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'},
+          {'id': 'd1c1bab0-6e19-4846-a470-e9cc2eb85088', 'val': 'child_start'},
+          {'id': 'e0fcb647-1e9e-4ae4-b560-0046515d5783', 'val': 'child_middle'},
+          {'id': '669dd810-360f-4694-a9f3-49597f23376a', 'val': 'child_end'},
+          {'id': '137dbc2f-b33c-4ea4-8b04-a62215ba9718', 'val': 'sibling'}]}
+[4:tasks] Starting step 4 with 1 task:
+- fin -> {'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'},
+          {'id': 'd1c1bab0-6e19-4846-a470-e9cc2eb85088', 'val': 'child_start'},
+          {'id': 'e0fcb647-1e9e-4ae4-b560-0046515d5783', 'val': 'child_middle'},
+          {'id': '669dd810-360f-4694-a9f3-49597f23376a', 'val': 'child_end'},
+          {'id': '137dbc2f-b33c-4ea4-8b04-a62215ba9718', 'val': 'sibling'}]}
+[4:writes] Finished step 4 with writes to 1 channel:
+- path -> ['fin']
+[4:checkpoint] State at the end of step 4:
+{'name': 'test',
+ 'path': [{'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49', 'val': 'grandparent'},
+          {'id': '2a6f0263-3949-4e47-a210-57f817e6097d', 'val': 'parent'},
+          {'id': 'd1c1bab0-6e19-4846-a470-e9cc2eb85088', 'val': 'child_start'},
+          {'id': 'e0fcb647-1e9e-4ae4-b560-0046515d5783', 'val': 'child_middle'},
+          {'id': '669dd810-360f-4694-a9f3-49597f23376a', 'val': 'child_end'},
+          {'id': '137dbc2f-b33c-4ea4-8b04-a62215ba9718', 'val': 'sibling'},
+          {'id': 'a4328c5f-845a-43de-b3d7-53a39208e316', 'val': 'fin'}]}
+{'name': 'test',
+ 'path': [{'val': 'grandparent', 'id': '79a81f03-d16d-4d12-94a6-4ba29fc9ce49'},
+  {'val': 'parent', 'id': '2a6f0263-3949-4e47-a210-57f817e6097d'},
+  {'val': 'child_start', 'id': 'd1c1bab0-6e19-4846-a470-e9cc2eb85088'},
+  {'val': 'child_middle', 'id': 'e0fcb647-1e9e-4ae4-b560-0046515d5783'},
+  {'val': 'child_end', 'id': '669dd810-360f-4694-a9f3-49597f23376a'},
+  {'val': 'sibling', 'id': '137dbc2f-b33c-4ea4-8b04-a62215ba9718'},
+  {'val': 'fin', 'id': 'a4328c5f-845a-43de-b3d7-53a39208e316'}]}
+
+
+
+
+PGVector
+An implementation of LangChain vectorstore abstraction using postgres as the backend and utilizing the pgvector extension.
+
+The code lives in an integration package called: langchain_postgres.
+
+Status
+This code has been ported over from langchain_community into a dedicated package called langchain-postgres. The following changes have been made:
+
+langchain_postgres works only with psycopg3. Please update your connnecion strings from postgresql+psycopg2://... to postgresql+psycopg://langchain:langchain@... (yes, it's the driver name is psycopg not psycopg3, but it'll use psycopg3.
+The schema of the embedding store and collection have been changed to make add_documents work correctly with user specified ids.
+One has to pass an explicit connection object now.
+Currently, there is no mechanism that supports easy data migration on schema changes. So any schema changes in the vectorstore will require the user to recreate the tables and re-add the documents. If this is a concern, please use a different vectorstore. If not, this implementation should be fine for your use case.
+
+Setup
+First donwload the partner package:
+
+pip install -qU langchain_postgres
+
+You can run the following command to spin up a a postgres container with the pgvector extension:
+
+%docker run --name pgvector-container -e POSTGRES_USER=langchain -e POSTGRES_PASSWORD=langchain -e POSTGRES_DB=langchain -p 6024:5432 -d pgvector/pgvector:pg16
+
+
+Credentials
+There are no credentials needed to run this notebook, just make sure you downloaded the langchain_postgres package and correctly started the postgres container.
+
+If you want to get best in-class automated tracing of your model calls you can also set your LangSmith API key by uncommenting below:
+
+# os.environ["LANGSMITH_API_KEY"] = getpass.getpass("Enter your LangSmith API key: ")
+# os.environ["LANGSMITH_TRACING"] = "true"
+
+Instantiation
+OpenAI
+HuggingFace
+Fake Embedding
+pip install -qU langchain-openai
+
+import getpass
+
+    os.environ["OPENAI_API_KEY"] = getpass.getpass()
+
+from langchain_openai import OpenAIEmbeddings
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+
+from langchain_core.documents import Document
+from langchain_postgres import PGVector
+from langchain_postgres.vectorstores import PGVector
+
+# See docker command above to launch a postgres instance with pgvector enabled.
+connection = "postgresql+psycopg://langchain:langchain@localhost:6024/langchain"  # Uses psycopg3!
+collection_name = "my_docs"
+
+
+vector_store = PGVector(
+    embeddings=embeddings,
+    collection_name=collection_name,
+    connection=connection,
+    use_jsonb=True,
+)
+
+API Reference:Document
+Manage vector store
+Add items to vector store
+Note that adding documents by ID will over-write any existing documents that match that ID.
+
+docs = [
+    Document(
+        page_content="there are cats in the pond",
+        metadata={"id": 1, "location": "pond", "topic": "animals"},
+    ),
+    Document(
+        page_content="ducks are also found in the pond",
+        metadata={"id": 2, "location": "pond", "topic": "animals"},
+    ),
+    Document(
+        page_content="fresh apples are available at the market",
+        metadata={"id": 3, "location": "market", "topic": "food"},
+    ),
+    Document(
+        page_content="the market also sells fresh oranges",
+        metadata={"id": 4, "location": "market", "topic": "food"},
+    ),
+    Document(
+        page_content="the new art exhibit is fascinating",
+        metadata={"id": 5, "location": "museum", "topic": "art"},
+    ),
+    Document(
+        page_content="a sculpture exhibit is also at the museum",
+        metadata={"id": 6, "location": "museum", "topic": "art"},
+    ),
+    Document(
+        page_content="a new coffee shop opened on Main Street",
+        metadata={"id": 7, "location": "Main Street", "topic": "food"},
+    ),
+    Document(
+        page_content="the book club meets at the library",
+        metadata={"id": 8, "location": "library", "topic": "reading"},
+    ),
+    Document(
+        page_content="the library hosts a weekly story time for kids",
+        metadata={"id": 9, "location": "library", "topic": "reading"},
+    ),
+    Document(
+        page_content="a cooking class for beginners is offered at the community center",
+        metadata={"id": 10, "location": "community center", "topic": "classes"},
+    ),
+]
+
+vector_store.add_documents(docs, ids=[doc.metadata["id"] for doc in docs])
+
+[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+Delete items from vector store
+vector_store.delete(ids=["3"])
+
+Query vector store
+Once your vector store has been created and the relevant documents have been added you will most likely wish to query it during the running of your chain or agent.
+
+Filtering Support
+The vectorstore supports a set of filters that can be applied against the metadata fields of the documents.
+
+Operator	Meaning/Category
+\$eq	Equality (==)
+\$ne	Inequality (!=)
+\$lt	Less than (<)
+\$lte	Less than or equal (<=)
+\$gt	Greater than (>)
+\$gte	Greater than or equal (>=)
+\$in	Special Cased (in)
+\$nin	Special Cased (not in)
+\$between	Special Cased (between)
+\$like	Text (like)
+\$ilike	Text (case-insensitive like)
+\$and	Logical (and)
+\$or	Logical (or)
+Query directly
+Performing a simple similarity search can be done as follows:
+
+results = vector_store.similarity_search(
+    "kitty", k=10, filter={"id": {"$in": [1, 5, 2, 9]}}
+)
+for doc in results:
+    print(f"* {doc.page_content} [{doc.metadata}]")
+
+* there are cats in the pond [{'id': 1, 'topic': 'animals', 'location': 'pond'}]
+* the library hosts a weekly story time for kids [{'id': 9, 'topic': 'reading', 'location': 'library'}]
+* ducks are also found in the pond [{'id': 2, 'topic': 'animals', 'location': 'pond'}]
+* the new art exhibit is fascinating [{'id': 5, 'topic': 'art', 'location': 'museum'}]
+
+
+If you provide a dict with multiple fields, but no operators, the top level will be interpreted as a logical AND filter
+
+vector_store.similarity_search(
+    "ducks",
+    k=10,
+    filter={"id": {"$in": [1, 5, 2, 9]}, "location": {"$in": ["pond", "market"]}},
+)
+
+[Document(metadata={'id': 1, 'topic': 'animals', 'location': 'pond'}, page_content='there are cats in the pond'),
+ Document(metadata={'id': 2, 'topic': 'animals', 'location': 'pond'}, page_content='ducks are also found in the pond')]
+
+
+vector_store.similarity_search(
+    "ducks",
+    k=10,
+    filter={
+        "$and": [
+            {"id": {"$in": [1, 5, 2, 9]}},
+            {"location": {"$in": ["pond", "market"]}},
+        ]
+    },
+)
+
+[Document(metadata={'id': 1, 'topic': 'animals', 'location': 'pond'}, page_content='there are cats in the pond'),
+ Document(metadata={'id': 2, 'topic': 'animals', 'location': 'pond'}, page_content='ducks are also found in the pond')]
+
+
+If you want to execute a similarity search and receive the corresponding scores you can run:
+
+results = vector_store.similarity_search_with_score(query="cats", k=1)
+for doc, score in results:
+    print(f"* [SIM={score:3f}] {doc.page_content} [{doc.metadata}]")
+
+* [SIM=0.763449] there are cats in the pond [{'id': 1, 'topic': 'animals', 'location': 'pond'}]
+
+For a full list of the different searches you can execute on a PGVector vector store, please refer to the API reference.
+
+Query by turning into retriever
+You can also transform the vector store into a retriever for easier usage in your chains.
+
+retriever = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 1})
+retriever.invoke("kitty")
+
+[Document(metadata={'id': 1, 'topic': 'animals', 'location': 'pond'}, page_content='there are cats in the pond')]
+
+
+Usage for retrieval-augmented generation
+For guides on how to use this vector store for retrieval-augmented generation (RAG), see the following sections:
+
+Tutorials: working with external knowledge
+How-to: Question and answer with RAG
+Retrieval conceptual docs
+API reference
+For detailed documentation of all ModuleNameVectorStore features and configurations head to the API reference: https://api.python.langchain.com/en/latest/vectorstores/langchain_postgres.vectorstores.PGVector.html
+
+Ты оператор проекта по созданию чат бота для автоматизации интерфейса приложения Карта жителя Татарстан в котором собрано множество сервисов, но у пользователей появляются проблемы которые возможно решить только с помощью тех поддержки.
+Чат бот будет работать на langgraph и использовать Postgresql для хранения обычных табличных данных и PGVector для RAG. 
+Сейчас чат бот имеет следующую структуру:
+from langchain.output_parsers import PydanticOutputParser
+from ..schemas import RouterAnswer, State
+from langchain_core.runnables import RunnableConfig
+from langchain_core.prompts import PromptTemplate
+from .model_init import init_chat_model
+
+parser = PydanticOutputParser(pydantic_object=RouterAnswer)
+format_instructions = parser.get_format_instructions()
+async def service_router(state: State, config: RunnableConfig) -> State:
+    prompt_template = "You are a service router. Determine which service the user's request is related to: 'accounts', 'cards', or 'parking'. Use next scheme for answer: {formatted_instructions}. User's input: {user_input}"
+    prompt = PromptTemplate.from_template(prompt_template)
+    chain = prompt | init_chat_model(mode="light") | parser
+    service = chain.invoke({"user_input": state["user_input"], "formatted_instructions":format_instructions})
+    return {"service": service.answer}
+
+from langgraph.graph import StateGraph, END, START
+from langgraph.prebuilt import ToolNode
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+from typing import TypedDict, List, Literal, Dict
+from ..schemas import SubState
+from .model_init import init_chat_model
+# Создание подграфа для работника
+def create_worker_subgraph(worker_name: str, worker_tools: List[tool]):
+    
+    
+    async def load_service_docs(state: SubState, config: RunnableConfig) -> SubState:
+        # Здесь должна быть логика загрузки документации для выбранного сервиса
+        return {"useless":''}
+
+
+    async def load_bot_docs(state: SubState, config: RunnableConfig) -> SubState:
+        print(state)
+        # Здесь должна быть логика загрузки документации бота
+        return {"useless":''}
+
+
+    async def process_message(state: SubState, config: RunnableConfig) -> SubState:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful banking assistant. Use the provided information to answer the user's question or call an appropriate tool."),
+            ("human", "{user_input}")
+        ])
+        chain = prompt | init_chat_model(mode="main").bind_tools(tools=worker_tools)
+        response = await chain.ainvoke({
+            "user_input": state["user_input"],
+        })
+        return {"answer": response, "messages":response}
+
+
+    subgraph = StateGraph(SubState)
+    subgraph.add_node("load_service_docs", load_service_docs)
+    subgraph.add_node("load_bot_docs", load_bot_docs)
+    subgraph.add_node("process_message", process_message)
+    subgraph.add_node("tools", ToolNode(worker_tools))
+
+
+    subgraph.add_edge(START, "load_service_docs")
+    subgraph.add_edge("load_service_docs", "load_bot_docs")
+    subgraph.add_edge("load_bot_docs", "process_message")
+
+
+    def should_continue(state: SubState) -> Literal["tools", "__end__"]:
+        last_message = state["answer"]
+        if last_message.tool_calls:
+            return "tools"
+        return "__end__"
+
+
+    subgraph.add_conditional_edges("process_message", should_continue)
+    subgraph.add_edge("tools", END)
+    return subgraph.compile()
+
+from langgraph.graph import StateGraph, END, START
+from langgraph.prebuilt import ToolNode
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+from typing import TypedDict, List, Literal, Dict
+from .schemas import State
+from .service_router import service_router
+from .subgraphs import accounts_subgraph, cards_subgraph, parking_subgraph
+
+# Основной граф
+main_graph = StateGraph(State)
+main_graph.add_node("service_router", service_router)
+main_graph.add_node("accounts", accounts_subgraph)
+main_graph.add_node("cards", cards_subgraph)
+main_graph.add_node("parking", parking_subgraph)
+
+
+main_graph.add_edge(START, "service_router")
+
+
+def route_to_service(state: State) -> Literal["accounts", "cards", "parking"]:
+    return state["service"]
+
+
+main_graph.add_conditional_edges("service_router", route_to_service)
+main_graph.add_edge("accounts", END)
+main_graph.add_edge("cards", END)
+main_graph.add_edge("parking", END)
+
+graph_runtime = main_graph.compile()
+
+
+from typing import TypedDict, List, Literal, Dict, Annotated
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
+from langchain.pydantic_v1 import BaseModel, Field
+
+
+class RouterAnswer(BaseModel):
+    answer:Literal['accounts', 'cards', 'parking']=Field(description="Points to service which is needed for user's request processing.")
+
+
+class GraphConfig(TypedDict):
+    thread_id: str
+    """The thread ID of the conversation."""
+    user_id: str
+    """The ID of the user to remember in the conversation."""
+
+
+class State(TypedDict):
+    messages:Annotated[List[AnyMessage], add_messages]
+    answer:AnyMessage
+    user_input:str
+    service: str
+    user_id: str
+    useless:str
+
+
+class SubState(TypedDict):
+    messages:Annotated[List[AnyMessage], add_messages]
+    user_input:str
+    answer:AnyMessage
+    useless:str
+
+
+Тебе нужно поэтапно улучшать этот проект, так как чат бот это очень важная вещь. Итеративно мы будем создавать документацию приложения карта жителя Татарстана и создавать чат бота который сможет отвечать за первую линию техподдержки и
+предоставлять специальные кнопки - виджеты которые будут являться для чат бота tools которые он может вызывать, а для пользователя на фронтенде отрисовываться и пользователь может по ним легко перейти в нужный сервис в приложении.
+
+Вот что такое tools:
+
+How to call tools using ToolNode
+This guide covers how to use LangGraph's prebuilt ToolNode for tool calling.
+
+ToolNode is a LangChain Runnable that takes graph state (with a list of messages) as input and outputs state update with the result of tool calls. It is designed to work well out-of-box with LangGraph's prebuilt ReAct agent, but can also work with any StateGraph as long as its state has a messages key with an appropriate reducer (see MessagesState).
+
+Setup
+%%capture --no-stderr
+%pip install --quiet -U langgraph langchain_anthropic
+import getpass
+import os
+
+
+def _set_env(var: str):
+    if not os.environ.get(var):
+        os.environ[var] = getpass.getpass(f"{var}: ")
+
+
+_set_env("ANTHROPIC_API_KEY")
+Define tools
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
+
+from langgraph.prebuilt import ToolNode
+@tool
+def get_weather(location: str):
+    """Call to get the current weather."""
+    if location.lower() in ["sf", "san francisco"]:
+        return "It's 60 degrees and foggy."
+    else:
+        return "It's 90 degrees and sunny."
+
+
+@tool
+def get_coolest_cities():
+    """Get a list of coolest cities"""
+    return "nyc, sf"
+tools = [get_weather, get_coolest_cities]
+tool_node = ToolNode(tools)
+Manually call ToolNode
+ToolNode operates on graph state with a list of messages. It expects the last message in the list to be an AIMessage with tool_calls parameter.
+
+Let's first see how to invoke the tool node manually:
+
+message_with_single_tool_call = AIMessage(
+    content="",
+    tool_calls=[
+        {
+            "name": "get_weather",
+            "args": {"location": "sf"},
+            "id": "tool_call_id",
+            "type": "tool_call",
+        }
+    ],
+)
+
+tool_node.invoke({"messages": [message_with_single_tool_call]})
+{'messages': [ToolMessage(content="It's 60 degrees and foggy.", name='get_weather', tool_call_id='tool_call_id')]}
+Note that typically you don't need to create AIMessage manually, and it will be automatically generated by any LangChain chat model that supports tool calling.
+
+You can also do parallel tool calling using ToolNode if you pass multiple tool calls to AIMessage's tool_calls parameter:
+
+message_with_multiple_tool_calls = AIMessage(
+    content="",
+    tool_calls=[
+        {
+            "name": "get_coolest_cities",
+            "args": {},
+            "id": "tool_call_id_1",
+            "type": "tool_call",
+        },
+        {
+            "name": "get_weather",
+            "args": {"location": "sf"},
+            "id": "tool_call_id_2",
+            "type": "tool_call",
+        },
+    ],
+)
+
+tool_node.invoke({"messages": [message_with_multiple_tool_calls]})
+{'messages': [ToolMessage(content='nyc, sf', name='get_coolest_cities', tool_call_id='tool_call_id_1'),
+  ToolMessage(content="It's 60 degrees and foggy.", name='get_weather', tool_call_id='tool_call_id_2')]}
+Using with chat models
+We'll be using a small chat model from Anthropic in our example. To use chat models with tool calling, we need to first ensure that the model is aware of the available tools. We do this by calling .bind_tools method on ChatAnthropic moodel
+
+from typing import Literal
+
+from langchain_anthropic import ChatAnthropic
+from langgraph.graph import StateGraph, MessagesState
+from langgraph.prebuilt import ToolNode
+
+
+model_with_tools = ChatAnthropic(
+    model="claude-3-haiku-20240307", temperature=0
+).bind_tools(tools)
+model_with_tools.invoke("what's the weather in sf?").tool_calls
+[{'name': 'get_weather',
+  'args': {'location': 'San Francisco'},
+  'id': 'toolu_01Fwm7dg1mcJU43Fkx2pqgm8',
+  'type': 'tool_call'}]
+As you can see, the AI message generated by the chat model already has tool_calls populated, so we can just pass it directly to ToolNode
+
+tool_node.invoke({"messages": [model_with_tools.invoke("what's the weather in sf?")]})
+{'messages': [ToolMessage(content="It's 60 degrees and foggy.", name='get_weather', tool_call_id='toolu_01LFvAVT3xJMeZS6kbWwBGZK')]}
+ReAct Agent
+Next, let's see how to use ToolNode inside a LangGraph graph. Let's set up a graph implementation of the ReAct agent. This agent takes some query as input, then repeatedly call tools until it has enough information to resolve the query. We'll be using ToolNode and the Anthropic model with tools we just defined
+
+from typing import Literal
+
+from langgraph.graph import StateGraph, MessagesState
+
+
+def should_continue(state: MessagesState) -> Literal["tools", "__end__"]:
+    messages = state["messages"]
+    last_message = messages[-1]
+    if last_message.tool_calls:
+        return "tools"
+    return "__end__"
+
+
+def call_model(state: MessagesState):
+    messages = state["messages"]
+    response = model_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+workflow = StateGraph(MessagesState)
+
+# Define the two nodes we will cycle between
+workflow.add_node("agent", call_model)
+workflow.add_node("tools", tool_node)
+
+workflow.add_edge("__start__", "agent")
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+)
+workflow.add_edge("tools", "agent")
+
+app = workflow.compile()
+from IPython.display import Image, display
+
+try:
+    display(Image(app.get_graph().draw_mermaid_png()))
+except Exception:
+    # This requires some extra dependencies and is optional
+    pass
+No description has been provided for this image
+Let's try it out!
+
+# example with a single tool call
+for chunk in app.stream(
+    {"messages": [("human", "what's the weather in sf?")]}, stream_mode="values"
+):
+    chunk["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+what's the weather in sf?
+================================== Ai Message ==================================
+
+[{'text': "Okay, let's check the weather in San Francisco:", 'type': 'text'}, {'id': 'toolu_01LdmBXYeccWKdPrhZSwFCDX', 'input': {'location': 'San Francisco'}, 'name': 'get_weather', 'type': 'tool_use'}]
+Tool Calls:
+  get_weather (toolu_01LdmBXYeccWKdPrhZSwFCDX)
+ Call ID: toolu_01LdmBXYeccWKdPrhZSwFCDX
+  Args:
+    location: San Francisco
+================================= Tool Message =================================
+Name: get_weather
+
+It's 60 degrees and foggy.
+================================== Ai Message ==================================
+
+The weather in San Francisco is currently 60 degrees with foggy conditions.
+# example with a multiple tool calls in succession
+
+for chunk in app.stream(
+    {"messages": [("human", "what's the weather in the coolest cities?")]},
+    stream_mode="values",
+):
+    chunk["messages"][-1].pretty_print()
+================================ Human Message =================================
+
+what's the weather in the coolest cities?
+================================== Ai Message ==================================
+
+[{'text': "Okay, let's find out the weather in the coolest cities:", 'type': 'text'}, {'id': 'toolu_01LFZUWTccyveBdaSAisMi95', 'input': {}, 'name': 'get_coolest_cities', 'type': 'tool_use'}]
+Tool Calls:
+  get_coolest_cities (toolu_01LFZUWTccyveBdaSAisMi95)
+ Call ID: toolu_01LFZUWTccyveBdaSAisMi95
+  Args:
+================================= Tool Message =================================
+Name: get_coolest_cities
+
+nyc, sf
+================================== Ai Message ==================================
+
+[{'text': "Now let's get the weather for those cities:", 'type': 'text'}, {'id': 'toolu_01RHPQBhT1u6eDnPqqkGUpsV', 'input': {'location': 'nyc'}, 'name': 'get_weather', 'type': 'tool_use'}]
+Tool Calls:
+  get_weather (toolu_01RHPQBhT1u6eDnPqqkGUpsV)
+ Call ID: toolu_01RHPQBhT1u6eDnPqqkGUpsV
+  Args:
+    location: nyc
+================================= Tool Message =================================
+Name: get_weather
+
+It's 90 degrees and sunny.
+================================== Ai Message ==================================
+
+[{'id': 'toolu_01W5sFGF8PfgYzdY4CqT5c6e', 'input': {'location': 'sf'}, 'name': 'get_weather', 'type': 'tool_use'}]
+Tool Calls:
+  get_weather (toolu_01W5sFGF8PfgYzdY4CqT5c6e)
+ Call ID: toolu_01W5sFGF8PfgYzdY4CqT5c6e
+  Args:
+    location: sf
+================================= Tool Message =================================
+Name: get_weather
+
+It's 60 degrees and foggy.
+================================== Ai Message ==================================
+
+Based on the results, it looks like the weather in the coolest cities is:
+- New York City: 90 degrees and sunny
+- San Francisco: 60 degrees and foggy
+
+So the weather in the coolest cities is a mix of warm and cool temperatures, with some sunny and some foggy conditions.
+ToolNode can also handle errors during tool execution. You can enable / disable this by setting handle_tool_errors=True (enabled by default). See our guide on handling errors in ToolNode here
+
+
+
+Вот как выглядит пример tools которая дает нужную информацию для отрисовки виджета на фронтенде.
+import os
+from typing import Dict, Union
+
+import requests
+from langchain.pydantic_v1 import BaseModel, Field
+from langchain_core.tools import tool
+
+
+class GithubRepoInput(BaseModel):
+    owner: str = Field(..., description="The name of the repository owner.")
+    repo: str = Field(..., description="The name of the repository.")
+
+
+@tool("github-repo", args_schema=GithubRepoInput, return_direct=True)
+def github_repo(owner: str, repo: str) -> Union[Dict, str]:
+    """Get information about a GitHub repository."""
+    if not os.environ.get("GITHUB_TOKEN"):
+        raise ValueError("Missing GITHUB_TOKEN secret.")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    url = f"https://api.github.com/repos/{owner}/{repo}"
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        repo_data = response.json()
+        return {
+            "owner": owner,
+            "repo": repo,
+            "description": repo_data.get("description", ""),
+            "stars": repo_data.get("stargazers_count", 0),
+            "language": repo_data.get("language", ""),
+        }
+    except requests.exceptions.RequestException as err:
+        print(err)
+        return "There was an error fetching the repository. Please check the owner and repo names."
+
+Такого рода и должны быть функции.
+Их будет много и нужно будет их хранить в базе данных или в папках. Для них нужна достаточная документация.
+Так как их много мы будем разделять их по Работникам, у которых их будет ограниченное количество. Сначала запрос проходит на роутер который направляет его на нужного работника.
+Далее Работник - унифицированный подграф который должен подгружать нужные ему функции, документы, специальные документы RAG.
+Далее для этих функций будет создана специальная обертка которая принимает Pydantic объект в котором поля - аргументы функции + дополнительный комментарий от LLM. Изнутри же эта обертка будет вызывать искомую функцию и отправлять результат + доп комментарий.
+Tools должны быть разнообразные, так как мы хотим оптимизировать весь интерфейс приложения.
+Далее основной граф собирает все это, и есть фукнкция которая вызывает этот граф. У нас также есть fastapi обертка для этого графа которая позволяет обращаться к нему по api.
+
+На данный момент мы УЖЕ провели большую работу и получили следующую структуру файлов:
+chatbot/
+│
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config.py
+│   ├── test_data.py
+│   ├── database/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── connection.py
+│   │   └── crud.py
+│   ├── graphs/
+│   │   ├── __init__.py
+│   │   ├── main_graph.py
+│   │   └── worker_subgraph.py
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── router.py
+│   │   ├── document_manager.py
+│   │   ├── vector_store.py
+│   │   └── llm.py
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   └── wrapper.py
+│   └── schemas/
+│       ├── __init__.py
+│       └── state.py
+├── alembic/
+│   └── ...
+├── tests/
+│   └── ...
+├── .env
+├── run.py
+├── requirements.txt
+└── README.md
+
+Далее укажу контент файлов:
+
+app/database/connection.py
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+from ..config import settings
+
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
+
+engine = create_async_engine(SQLALCHEMY_DATABASE_URL, echo=True)
+AsyncSessionLocal = sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
+)
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
+
+app/database/crud.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from . import models
+from ..schemas.state import State, SubState
+from ..tools.wrapper import ToolWrapper
+import dill
+from typing import List, Callable, Optional
+from ..services.vector_store import get_vectorstore
+
+def serialize_function(func: Callable) -> str:
+    return dill.dumps(func).hex()
+
+def deserialize_function(serialized_func: str) -> Callable:
+    return dill.loads(bytes.fromhex(serialized_func))
+
+async def load_service_data(db: AsyncSession, service_name: str) -> Optional[models.Service]:
+    stmt = select(models.Service).where(models.Service.name == service_name)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+async def load_tools(db: AsyncSession, service_name: str) -> List[Callable]:
+    service = await load_service_data(db, service_name)
+    if not service:
+        return []
+    
+    stmt = select(models.Tool).where(models.Tool.service_id == service.id)
+    result = await db.execute(stmt)
+    tools = result.scalars().all()
+    
+    return [deserialize_function(tool.function) for tool in tools]
+
+async def save_tool(db: AsyncSession, tool: ToolWrapper, service_id: int) -> models.Tool:
+    db_tool = models.Tool(
+        name=tool.name,
+        description=tool.description,
+        function=serialize_function(tool.function),
+        service_id=service_id
+    )
+    db.add(db_tool)
+    await db.commit()
+    await db.refresh(db_tool)
+    return db_tool
+
+async def save_service(db: AsyncSession, service_name: str, prompt: str, documentation: str) -> models.Service:
+    db_service = models.Service(
+        name=service_name,
+        prompt=prompt,
+        documentation=documentation
+    )
+    db.add(db_service)
+    await db.commit()
+    await db.refresh(db_service)
+    return db_service
+
+async def get_or_create_service(db: AsyncSession, service_name: str, prompt: str = "", documentation: str = "") -> models.Service:
+    service = await load_service_data(db, service_name)
+    if not service:
+        service = await save_service(db, service_name, prompt, documentation)
+    return service
+
+async def update_service(db: AsyncSession, service_id: int, prompt: str = None, documentation: str = None) -> Optional[models.Service]:
+    stmt = select(models.Service).where(models.Service.id == service_id)
+    result = await db.execute(stmt)
+    service = result.scalar_one_or_none()
+    
+    if service:
+        if prompt is not None:
+            service.prompt = prompt
+        if documentation is not None:
+            service.documentation = documentation
+        await db.commit()
+        await db.refresh(service)
+    
+    return service
+
+async def delete_tool(db: AsyncSession, tool_id: int) -> bool:
+    stmt = select(models.Tool).where(models.Tool.id == tool_id)
+    result = await db.execute(stmt)
+    tool = result.scalar_one_or_none()
+    
+    if tool:
+        await db.delete(tool)
+        await db.commit()
+        return True
+    return False
+
+async def update_tool(db: AsyncSession, tool_id: int, name: str = None, description: str = None, function: Callable = None) -> Optional[models.Tool]:
+    stmt = select(models.Tool).where(models.Tool.id == tool_id)
+    result = await db.execute(stmt)
+    tool = result.scalar_one_or_none()
+    
+    if tool:
+        if name is not None:
+            tool.name = name
+        if description is not None:
+            tool.description = description
+        if function is not None:
+            tool.function = serialize_function(function)
+        await db.commit()
+        await db.refresh(tool)
+    
+    return tool
+
+async def load_vector_documents(service_name: str, query: str, k: int = 5):
+    vectorstore = get_vectorstore()
+    docs = await vectorstore.asimilarity_search_with_score(query, k=k, filter={"service": service_name})
+    return docs
+
+app/database/models.py
+
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class Service(Base):
+    __tablename__ = "services"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    prompt = Column(String)
+    documentation = Column(String)
+
+class Tool(Base):
+    __tablename__ = "tools"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    description = Column(String)
+    function = Column(String)
+    service_id = Column(Integer, ForeignKey("services.id"))
+
+
+app/graphs/main_graph.py
+
+from langgraph.graph import StateGraph, END
+from ..schemas.state import State, RouterOutput
+from ..services.router import service_router
+from .worker_subgraph import create_worker_subgraph
+
+def create_main_graph():
+    main_graph = StateGraph(State)
+    
+    main_graph.add_node("service_router", service_router)
+    
+    services = ["accounts", "parking"]
+    for service in services:
+        main_graph.add_node(service, create_worker_subgraph(service))
+
+    main_graph.set_entry_point("service_router")
+
+    def route_to_service(state: State) -> RouterOutput:
+        return RouterOutput(service=state.service)
+
+    main_graph.add_conditional_edges(
+        "service_router",
+        route_to_service,
+        {service: service for service in services}
+    )
+
+    for service in services:
+        main_graph.add_edge(service, END)
+
+    return main_graph.compile()
+
+app/graphs/worker_subgraph.py
+
+from langgraph.graph import StateGraph, END, START
+from ..schemas.state import SubState
+from ..services.llm import init_chat_model
+from ..database.crud import load_service_data, load_tools, load_vector_documents
+from ..tools.wrapper import create_tools
+from langgraph.prebuilt import ToolNode
+
+def create_worker_subgraph(service_name: str):
+    subgraph = StateGraph(SubState)
+
+    async def load_service_data_node(state: SubState):
+        service_data = await load_service_data(state.metadata["db"], service_name)
+        return {"metadata": {"service_data": service_data}}
+
+    async def load_tools_node(state: SubState):
+        tool_data = await load_tools(state.metadata["db"], service_name)
+        tools = create_tools(tool_data)
+        tool_node = ToolNode(tools)
+        return {"metadata": {"tools": tools, "tool_node": tool_node}}
+
+    async def load_vector_docs_node(state: SubState):
+        docs = await load_vector_documents(service_name, state.user_input)
+        return {"metadata": {"vector_docs": docs}}
+
+    async def process_message(state: SubState):
+        service_data = state.metadata["service_data"]
+        tools = state.metadata["tools"]
+        vector_docs = state.metadata.get("vector_docs", [])
+        
+        llm = init_chat_model(mode="main")
+        llm_with_tools = llm.bind_tools(tools)
+        
+        context = "\n".join([doc.page_content for doc, _ in vector_docs])
+        
+        response = await llm_with_tools.ainvoke({
+            "service_data": service_data,
+            "context": context,
+            "user_input": state.user_input,
+        })
+        
+        return {"answer": response, "messages": [response]}
+
+    subgraph.add_node("load_service_data", load_service_data_node)
+    subgraph.add_node("load_tools", load_tools_node)
+    subgraph.add_node("load_vector_docs", load_vector_docs_node)
+    subgraph.add_node("process_message", process_message)
+
+    subgraph.add_edge(START, "load_service_data")
+    subgraph.add_edge("load_service_data", "load_tools")
+    subgraph.add_edge("load_tools", "load_vector_docs")
+    subgraph.add_edge("load_vector_docs", "process_message")
+
+    def should_use_tool(state: SubState):
+        last_message = state.messages[-1]
+        if last_message.tool_calls:
+            return "use_tool"
+        return END
+
+    async def use_tool(state: SubState):
+        tool_node = state.metadata["tool_node"]
+        tool_results = await tool_node.ainvoke(state)
+        
+        # Обработка результатов инструментов
+        processed_results = []
+        for result in tool_results.get("messages", []):
+            if isinstance(result, dict) and "result" in result and "description" in result:
+                processed_results.append({
+                    "result": result["result"],
+                    "description": result["description"]
+                })
+            else:
+                processed_results.append(result)
+        
+        return {"tool_results": processed_results}
+
+    subgraph.add_node("use_tool", use_tool)
+
+    subgraph.add_conditional_edges(
+        "process_message",
+        should_use_tool,
+        {
+            "use_tool": "use_tool",
+            END: END
+        }
+    )
+    subgraph.add_edge("use_tool", "process_message")
+
+    return subgraph.compile()
+
+
+app/schemas/state.py
+
+from typing import List, Dict, Any, Literal, Annotated
+from pydantic import BaseModel
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
+from langchain.pydantic_v1 import BaseModel as LangModel
+
+class State(BaseModel):
+    messages: Annotated[List[AnyMessage], add_messages]
+    service: str
+    user_input: str
+    answer: Any
+    user_id: str
+    metadata: Dict[str, Any] = {}
+
+class SubState(BaseModel):
+    messages: Annotated[List[AnyMessage], add_messages]
+    user_input: str
+    answer: Any
+    service_id: str
+    metadata: Dict[str, Any] = {}
+
+class RouterOutput(LangModel):
+    service: Literal['accounts', 'cards', 'parking', 'legal_assistant']
+
+class UserInput(BaseModel):
+    user_input:str
+    user_id:str
+
+app/services/document_manager.py
+
+from .vector_store import add_documents_to_vectorstore
+
+async def add_service_documents(documents, service_name):
+    await add_documents_to_vectorstore(documents, service_name)
+
+# Добавьте другие функции для управления документами, если необходимо
+
+app/services/llm.py
+
+from langchain_openai import ChatOpenAI
+from typing import Literal
+from ..config import settings
+
+
+def init_chat_model(mode:Literal['light', 'main']):
+    if mode=='light':
+        return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model="gpt-4o-mini", openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)
+    return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model='gpt-4o', openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)
+
+
+app/services/router.py
+
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableConfig
+from ..schemas.state import State, RouterOutput
+from .llm import init_chat_model
+
+router_parser = PydanticOutputParser(pydantic_object=RouterOutput)
+
+async def service_router(state: State, config: RunnableConfig) -> State:
+    prompt_template = """You are a service router for the Tatarstan Resident Card application. 
+    Determine which service the user's request is related to: 'accounts', 'cards', 'parking', or 'legal_assistant'. 
+    Use the following format for your answer: {format_instructions}
+
+    User's input: {user_input}
+    """
+    
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["user_input"],
+        partial_variables={"format_instructions": router_parser.get_format_instructions()}
+    )
+    
+    llm = init_chat_model(mode="light")
+    chain = prompt | llm | router_parser
+    
+    result = await chain.ainvoke({"user_input": state.user_input})
+    
+    return State(**state.dict(), service=result.service)
+
+
+app/services/vector_store.py
+
+from functools import lru_cache
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_postgres import PGVector
+from ..config import settings
+
+@lru_cache
+def get_vectorstore() -> PGVector:
+    embeddings = HuggingFaceEmbeddings(
+        model_name=settings.EMBEDDINGS_MODEL,
+        model_kwargs={"device": settings.DEVICE}
+    )
+    vectorstore = PGVector(
+        embeddings=embeddings,
+        collection_name=settings.PG_COLLECTION_NAME,
+        connection=settings.PG_CONNECTION,
+        use_jsonb=True,
+        async_mode=True,
+    )
+    return vectorstore
+
+async def add_documents_to_vectorstore(documents, service_name):
+    vectorstore = get_vectorstore()
+    await vectorstore.aadd_documents(documents, metadatas=[{"service": service_name} for _ in documents])
+
+app/tools/base.py
+
+from pydantic import BaseModel, Field
+from typing import Any, Dict, Callable
+from langchain_core.tools import tool
+
+class ToolInput(BaseModel):
+    pass
+
+class ToolOutput(BaseModel):
+    result: Any
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class BaseTool:
+    def __init__(self, func: Callable, name: str, description: str):
+        self.func = func
+        self.name = name
+        self.description = description
+
+    def __call__(self, **kwargs) -> ToolOutput:
+        result = self.func(**kwargs)
+        return ToolOutput(result=result)
+
+    @classmethod
+    def from_function(cls, func: Callable, name: str, description: str):
+        return cls(func, name, description)
+
+def create_tool(func: Callable, name: str, description: str, input_schema: type[ToolInput]):
+    @tool(name, description=description, args_schema=input_schema)
+    def wrapped_tool(**kwargs) -> Dict[str, Any]:
+        tool_instance = BaseTool.from_function(func, name, description)
+        output = tool_instance(**kwargs)
+        return {"result": output.result, "metadata": output.metadata}
+
+    return wrapped_tool
+
+
+app/tools/wrapper.py
+
+from typing import List, Dict, Any, Callable
+from pydantic import BaseModel
+from langchain_core.tools import BaseTool, tool
+
+class ToolWrapper(BaseModel):
+    name: str
+    description: str
+    function: Callable
+    input_schema: type[BaseModel]
+
+def create_tool_from_callable(func: Callable, name: str, description: str, input_schema: type[BaseModel]) -> BaseTool:
+    @tool(name, description=description, args_schema=input_schema)
+    def dynamic_tool(**kwargs) -> Dict[str, Any]:
+        result = func(**kwargs)
+        return {
+            "result": result,
+            "description": description
+        }
+    
+    dynamic_tool.__doc__ = func.__doc__
+    
+    return dynamic_tool
+
+def create_tools(tools: List[tuple[Callable, type[BaseModel]]]) -> List[BaseTool]:
+    return [create_tool_from_callable(func, func.__name__, func.__doc__ or "", input_schema) for func, input_schema in tools]
+
+app/config.py
+
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+load_dotenv()
+from os import getenv
+class Settings(BaseSettings):
+    DATABASE_URL: str
+    OPENAI_API_KEY: str
+    OPENAI_BASE_PROVIDER: str
+    LLM_TEMPERATURE: float
+    EMBEDDINGS_MODEL: str
+    DEVICE: str
+    PG_COLLECTION_NAME: str
+    PG_CONNECTION: str
+    LANGCHAIN_TRACING_V2: str
+    LANGCHAIN_ENDPOINT: str
+    LANGCHAIN_API_KEY: str
+    LANGCHAIN_PROJECT: str
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+
+app/main.py
+
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from .database.connection import get_db
+from .graphs.main_graph import create_main_graph
+from .schemas.state import State, UserInput
+from .config import settings
+
+app = FastAPI()
+
+main_graph = create_main_graph()
+
+@app.post("/chat")
+async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
+    try:
+        initial_state = State(
+            messages=[],
+            service="",
+            user_input=user_input.user_input,
+            answer=None,
+            user_id=user_input.user_id,
+            metadata={}
+        )
+        result = await main_graph.ainvoke(initial_state, {"db": db})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+app/test_data.py
+
+from typing import Dict
+from pydantic import BaseModel, Field
+
+class AccountBalanceInput(BaseModel):
+    account_number: str = Field(..., description="Номер счета")
+
+class TransferMoneyInput(BaseModel):
+    from_account: str = Field(..., description="Номер счета отправителя")
+    to_account: str = Field(..., description="Номер счета получателя")
+    amount: float = Field(..., description="Сумма перевода")
+
+class ParkingInfoInput(BaseModel):
+    parking_id: str = Field(..., description="ID парковки")
+
+class ReserveParkingSpotInput(BaseModel):
+    parking_id: str = Field(..., description="ID парковки")
+    user_id: str = Field(..., description="ID пользователя")
+
+def get_account_balance(account_number: str) -> Dict[str, float]:
+    """
+    Получает баланс счета по номеру счета.
+    """
+    balance = float(account_number) * 100  # Просто для примера
+    return {"balance": balance}
+
+def transfer_money(from_account: str, to_account: str, amount: float) -> Dict[str, str]:
+    """
+    Переводит деньги с одного счета на другой.
+    """
+    return {"status": "success", "message": f"Переведено {amount} с счета {from_account} на счет {to_account}"}
+
+def get_parking_info(parking_id: str) -> Dict[str, str]:
+    """
+    Получает информацию о парковке по её ID.
+    """
+    return {"id": parking_id, "name": f"Парковка {parking_id}", "available_spots": "25"}
+
+def reserve_parking_spot(parking_id: str, user_id: str) -> Dict[str, str]:
+    """
+    Резервирует место на парковке для пользователя.
+    """
+    return {"status": "success", "message": f"Место на парковке {parking_id} зарезервировано для пользователя {user_id}"}
+
+# Словарь сервисов и их функций с соответствующими схемами ввода
+test_services = {
+    "accounts": [
+        (get_account_balance, AccountBalanceInput),
+        (transfer_money, TransferMoneyInput)
+    ],
+    "parking": [
+        (get_parking_info, ParkingInfoInput),
+        (reserve_parking_spot, ReserveParkingSpotInput)
+    ]
+}
+
+# Функция для инициализации тестовых данных в базе данных
+async def init_test_data(db):
+    from .database.crud import get_or_create_service, save_tool
+    from .tools.wrapper import ToolWrapper
+
+    for service_name, functions in test_services.items():
+        service = await get_or_create_service(db, service_name, f"Это сервис {service_name}", f"Документация для сервиса {service_name}")
+        
+        for func, input_schema in functions:
+            tool_wrapper = ToolWrapper(
+                name=func.__name__,
+                description=func.__doc__ or "",
+                function=func,
+                input_schema=input_schema
+            )
+            await save_tool(db, tool_wrapper, service.id)
+
+    print("Тестовые данные успешно инициализированы")
+
+
+run.py
+
+from app.main import app
+from app.database.connection import AsyncSessionLocal
+from app.test_data import init_test_data
+import asyncio
+
+async def init_data():
+    async with AsyncSessionLocal() as db:
+        await init_test_data(db)
+
+if __name__ == "__main__":
+    asyncio.run(init_data())
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
