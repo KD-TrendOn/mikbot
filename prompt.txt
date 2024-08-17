@@ -2495,21 +2495,96 @@ chatbot/
 
 Далее укажу контент файлов:
 
+alembic/env.py
+import asyncio
+from logging.config import fileConfig
+
+from sqlalchemy import pool
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+from app.database.models import Base
+target_metadata = Base.metadata
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+def do_run_migrations(connection: Connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+async def run_async_migrations() -> None:
+    """In this scenario we need to create an Engine
+    and associate a connection with the context."""
+
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await connectable.dispose()
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode."""
+
+    asyncio.get_event_loop().run_until_complete(run_async_migrations())
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+
 app/database/connection.py
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from ..config import settings
 
 SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
 engine = create_async_engine(SQLALCHEMY_DATABASE_URL, echo=True)
-AsyncSessionLocal = sessionmaker(
+AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
 
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
 
 app/database/crud.py
 
@@ -2533,7 +2608,8 @@ async def load_service_data(db: AsyncSession, service_name: str) -> Optional[mod
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
-async def load_tools(db: AsyncSession, service_name: str) -> List[Callable]:
+
+async def load_tools(db: AsyncSession, service_name: str) -> List[ToolWrapper]:
     service = await load_service_data(db, service_name)
     if not service:
         return []
@@ -2542,13 +2618,19 @@ async def load_tools(db: AsyncSession, service_name: str) -> List[Callable]:
     result = await db.execute(stmt)
     tools = result.scalars().all()
     
-    return [deserialize_function(tool.function) for tool in tools]
+    return [ToolWrapper(
+        name=tool.name,
+        description=tool.description,
+        function=deserialize_function(tool.function),
+        input_schema=deserialize_function(tool.input_schema)
+    ) for tool in tools if tool.function and tool.input_schema]
 
 async def save_tool(db: AsyncSession, tool: ToolWrapper, service_id: int) -> models.Tool:
     db_tool = models.Tool(
         name=tool.name,
         description=tool.description,
         function=serialize_function(tool.function),
+        input_schema=serialize_function(tool.input_schema),
         service_id=service_id
     )
     db.add(db_tool)
@@ -2621,6 +2703,7 @@ async def load_vector_documents(service_name: str, query: str, k: int = 5):
     docs = await vectorstore.asimilarity_search_with_score(query, k=k, filter={"service": service_name})
     return docs
 
+
 app/database/models.py
 
 from sqlalchemy import Column, Integer, String, ForeignKey
@@ -2643,13 +2726,13 @@ class Tool(Base):
     name = Column(String, unique=True, index=True)
     description = Column(String)
     function = Column(String)
+    input_schema = Column(String)  # Добавляем это поле
     service_id = Column(Integer, ForeignKey("services.id"))
-
 
 app/graphs/main_graph.py
 
 from langgraph.graph import StateGraph, END
-from ..schemas.state import State, RouterOutput
+from ..schemas.state import State
 from ..services.router import service_router
 from .worker_subgraph import create_worker_subgraph
 
@@ -2664,8 +2747,9 @@ def create_main_graph():
 
     main_graph.set_entry_point("service_router")
 
-    def route_to_service(state: State) -> RouterOutput:
-        return RouterOutput(service=state.service)
+    def route_to_service(state: State):
+        # Убедимся, что db передается дальше
+        return state.service if state.service in services else END
 
     main_graph.add_conditional_edges(
         "service_router",
@@ -2678,35 +2762,57 @@ def create_main_graph():
 
     return main_graph.compile()
 
+
 app/graphs/worker_subgraph.py
 
+import asyncio
+import logging
 from langgraph.graph import StateGraph, END, START
 from ..schemas.state import SubState
 from ..services.llm import init_chat_model
 from ..database.crud import load_service_data, load_tools, load_vector_documents
 from ..tools.wrapper import create_tools
 from langgraph.prebuilt import ToolNode
+from langchain_core.prompts import PromptTemplate
+logger = logging.getLogger(__name__)
 
 def create_worker_subgraph(service_name: str):
+    logger.info(f"Creating worker subgraph for service: {service_name}")
     subgraph = StateGraph(SubState)
 
     async def load_service_data_node(state: SubState):
-        service_data = await load_service_data(state.metadata["db"], service_name)
-        return {"metadata": {"service_data": service_data}}
+        logger.debug(f"Loading service data for {service_name}")
+        logger.debug(f"State metadata: {state.metadata}")
+        db = state.metadata.get("db")
+        if db is None:
+            logger.error("Database session is None in load_service_data_node")
+            raise ValueError("Database session is not available")
+        service_data = await asyncio.create_task(load_service_data(db, service_name))
+        logger.debug(f"Service data loaded: {service_data}")
+        return {"metadata": {**state.metadata, "service_data": service_data}}
 
     async def load_tools_node(state: SubState):
-        tool_data = await load_tools(state.metadata["db"], service_name)
-        tools = create_tools(tool_data)
+        logger.debug(f"Loading tools for {service_name}")
+        logger.debug(f"State metadata: {state.metadata}")
+        db = state.metadata.get("db")
+        if db is None:
+            logger.error("Database session is None in load_tools_node")
+            raise ValueError("Database session is not available")
+        tool_wrappers = await asyncio.create_task(load_tools(db, service_name))
+        tools = create_tools(tool_wrappers)
         tool_node = ToolNode(tools)
-        return {"metadata": {"tools": tools, "tool_node": tool_node}}
-
-    async def load_vector_docs_node(state: SubState):
-        docs = await load_vector_documents(service_name, state.user_input)
-        return {"metadata": {"vector_docs": docs}}
+        
+        # Создаем описание инструментов для промпта
+        tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
+        
+        logger.debug(f"Tools loaded: {[tool.name for tool in tools]}")
+        return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node, "tools_description": tools_description}}
 
     async def process_message(state: SubState):
-        service_data = state.metadata["service_data"]
-        tools = state.metadata["tools"]
+        logger.debug("Processing message")
+        service_data = state.metadata.get("service_data")
+        tools = state.metadata.get("tools")
+        tools_description = state.metadata.get("tools_description")
         vector_docs = state.metadata.get("vector_docs", [])
         
         llm = init_chat_model(mode="main")
@@ -2714,13 +2820,37 @@ def create_worker_subgraph(service_name: str):
         
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
         
-        response = await llm_with_tools.ainvoke({
-            "service_data": service_data,
-            "context": context,
-            "user_input": state.user_input,
-        })
+        prompt_template = """You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
         
+        Available tools:
+        {tools_description}
+        
+        For each tool, you must provide a 'description' field in addition to the required arguments. 
+        This description should be a brief explanation of the action being taken, which will be shown to the user.
+        
+        Service context:
+        {service_data}
+        
+        Additional context:
+        {context}
+        
+        User input: {user_input}
+        
+        Please respond to the user's input using the available tools if necessary. 
+        Remember to include a meaningful description for each tool use."""
+        prompt = PromptTemplate.from_template(prompt_template)
+        logger.debug(f"Invoking LLM with prompt: {prompt.format(service_name=service_name, tools_description=tools_description, service_data=service_data.documentation if service_data else 'No service data available', context=context, user_input = state.user_input)}")
+        bound = prompt | llm_with_tools
+        response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
+        logger.debug(f"LLM response received {response.content}")
         return {"answer": response, "messages": [response]}
+
+    async def load_vector_docs_node(state: SubState):
+        logger.debug(f"Loading vector documents for query: {state.user_input}")
+        docs = await load_vector_documents(service_name, state.user_input)
+        logger.debug(f"Vector documents loaded: {len(docs)} documents")
+        return {"metadata": {**state.metadata, "vector_docs": docs}}
+    
 
     subgraph.add_node("load_service_data", load_service_data_node)
     subgraph.add_node("load_tools", load_tools_node)
@@ -2733,16 +2863,23 @@ def create_worker_subgraph(service_name: str):
     subgraph.add_edge("load_vector_docs", "process_message")
 
     def should_use_tool(state: SubState):
+        logger.debug("Checking if tool should be used")
         last_message = state.messages[-1]
         if last_message.tool_calls:
+            logger.debug("Tool call detected")
             return "use_tool"
+        logger.debug("No tool call detected")
         return END
 
     async def use_tool(state: SubState):
-        tool_node = state.metadata["tool_node"]
-        tool_results = await tool_node.ainvoke(state)
+        logger.debug("Using tool")
+        tool_node = state.metadata.get("tool_node")
+        if tool_node is None:
+            logger.error("Tool node is None in use_tool")
+            raise ValueError("Tool node is not available")
+        tool_results = await tool_node.ainvoke(state.dict())
         
-        # Обработка результатов инструментов
+        logger.debug("Processing tool results")
         processed_results = []
         for result in tool_results.get("messages", []):
             if isinstance(result, dict) and "result" in result and "description" in result:
@@ -2753,6 +2890,7 @@ def create_worker_subgraph(service_name: str):
             else:
                 processed_results.append(result)
         
+        logger.debug(f"Processed {len(processed_results)} tool results")
         return {"tool_results": processed_results}
 
     subgraph.add_node("use_tool", use_tool)
@@ -2767,38 +2905,39 @@ def create_worker_subgraph(service_name: str):
     )
     subgraph.add_edge("use_tool", "process_message")
 
+    logger.info(f"Worker subgraph for {service_name} created successfully")
     return subgraph.compile()
-
 
 app/schemas/state.py
 
-from typing import List, Dict, Any, Literal, Annotated
-from pydantic import BaseModel
+from typing import List, Dict, Any, Optional, Annotated
+from pydantic.v1 import BaseModel as VBaseModel, Field as VField
+from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
-from langchain.pydantic_v1 import BaseModel as LangModel
 
-class State(BaseModel):
-    messages: Annotated[List[AnyMessage], add_messages]
-    service: str
+class State(VBaseModel):
+    messages: Annotated[List[AnyMessage], add_messages] = VField(default_factory=list)
+    service: Optional[str] = None
     user_input: str
-    answer: Any
+    answer: Any = None
     user_id: str
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-class SubState(BaseModel):
-    messages: Annotated[List[AnyMessage], add_messages]
+class SubState(VBaseModel):
+    messages: Annotated[List[AnyMessage], add_messages] = VField(default_factory=list)
     user_input: str
-    answer: Any
-    service_id: str
-    metadata: Dict[str, Any] = {}
+    answer: Any = None
+    service: Optional[str] = None
+    metadata: Dict[str, Any] = VField(default_factory=dict)
 
-class RouterOutput(LangModel):
-    service: Literal['accounts', 'cards', 'parking', 'legal_assistant']
+class RouterOutput(VBaseModel):
+    service: str
 
 class UserInput(BaseModel):
-    user_input:str
-    user_id:str
+    user_input: str
+    user_id: str
+
 
 app/services/document_manager.py
 
@@ -2821,7 +2960,6 @@ def init_chat_model(mode:Literal['light', 'main']):
         return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model="gpt-4o-mini", openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)
     return ChatOpenAI(temperature=settings.LLM_TEMPERATURE, model='gpt-4o', openai_api_key=settings.OPENAI_API_KEY, openai_api_base=settings.OPENAI_BASE_PROVIDER)
 
-
 app/services/router.py
 
 from langchain.output_parsers import PydanticOutputParser
@@ -2834,7 +2972,7 @@ router_parser = PydanticOutputParser(pydantic_object=RouterOutput)
 
 async def service_router(state: State, config: RunnableConfig) -> State:
     prompt_template = """You are a service router for the Tatarstan Resident Card application. 
-    Determine which service the user's request is related to: 'accounts', 'cards', 'parking', or 'legal_assistant'. 
+    Determine which service the user's request is related to: 'accounts' or 'parking'. 
     Use the following format for your answer: {format_instructions}
 
     User's input: {user_input}
@@ -2851,8 +2989,10 @@ async def service_router(state: State, config: RunnableConfig) -> State:
     
     result = await chain.ainvoke({"user_input": state.user_input})
     
-    return State(**state.dict(), service=result.service)
-
+    # Обновляем существующее состояние, а не создаем новое
+    state_dict = state.dict()
+    state_dict['service'] = result.service
+    return state_dict
 
 app/services/vector_store.py
 
@@ -2879,6 +3019,7 @@ def get_vectorstore() -> PGVector:
 async def add_documents_to_vectorstore(documents, service_name):
     vectorstore = get_vectorstore()
     await vectorstore.aadd_documents(documents, metadatas=[{"service": service_name} for _ in documents])
+
 
 app/tools/base.py
 
@@ -2916,11 +3057,10 @@ def create_tool(func: Callable, name: str, description: str, input_schema: type[
 
     return wrapped_tool
 
-
 app/tools/wrapper.py
 
 from typing import List, Dict, Any, Callable
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_core.tools import BaseTool, tool
 
 class ToolWrapper(BaseModel):
@@ -2929,21 +3069,39 @@ class ToolWrapper(BaseModel):
     function: Callable
     input_schema: type[BaseModel]
 
-def create_tool_from_callable(func: Callable, name: str, description: str, input_schema: type[BaseModel]) -> BaseTool:
-    @tool(name, description=description, args_schema=input_schema)
+def create_tool_from_callable(tool_wrapper: ToolWrapper) -> BaseTool:
+    # Создаем новую схему ввода, которая включает оригинальные поля и description
+    class EnhancedInputSchema(tool_wrapper.input_schema):
+        description: str = Field(..., description="Дополнительное описание для пользователя")
+
+    @tool(tool_wrapper.name, args_schema=EnhancedInputSchema)
     def dynamic_tool(**kwargs) -> Dict[str, Any]:
-        result = func(**kwargs)
+        """
+        {description}
+
+        This tool takes the following arguments:
+        {args_description}
+        """
+        # Извлекаем description и передаем остальные аргументы в оригинальную функцию
+        description = kwargs.pop('description')
+        result = tool_wrapper.function(**kwargs)
         return {
             "result": result,
             "description": description
         }
     
-    dynamic_tool.__doc__ = func.__doc__
+    # Обновляем документацию функции
+    args_description = "\n".join([f"- {field}: {field_info.description}" for field, field_info in EnhancedInputSchema.__fields__.items() if field != 'description'])
+    dynamic_tool.__doc__ = dynamic_tool.__doc__.format(
+        description=tool_wrapper.description,
+        args_description=args_description
+    )
     
     return dynamic_tool
 
-def create_tools(tools: List[tuple[Callable, type[BaseModel]]]) -> List[BaseTool]:
-    return [create_tool_from_callable(func, func.__name__, func.__doc__ or "", input_schema) for func, input_schema in tools]
+def create_tools(tools: List[ToolWrapper]) -> List[BaseTool]:
+    return [create_tool_from_callable(tool_wrapper) for tool_wrapper in tools]
+
 
 app/config.py
 
@@ -2971,37 +3129,47 @@ settings = Settings()
 
 app/main.py
 
+import logging
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from .database.connection import get_db
 from .graphs.main_graph import create_main_graph
 from .schemas.state import State, UserInput
-from .config import settings
 
 app = FastAPI()
 
 main_graph = create_main_graph()
 
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 @app.post("/chat")
 async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
     try:
         initial_state = State(
-            messages=[],
-            service="",
             user_input=user_input.user_input,
-            answer=None,
             user_id=user_input.user_id,
-            metadata={}
+            metadata={"db": db}
         )
-        result = await main_graph.ainvoke(initial_state, {"db": db})
+        logger.debug(f"Initial state: {initial_state}")
+        
+        result = await main_graph.ainvoke(initial_state)
         return result
     except Exception as e:
+        logger.exception("An error occurred during chat processing")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Удалите эту функцию, так как она больше не нужна
+# @app.on_event("startup")
+# async def startup_event():
+#     loop = asyncio.get_event_loop()
+#     asyncio.set_event_loop(loop)
 
 app/test_data.py
 
 from typing import Dict
 from pydantic import BaseModel, Field
+from .tools.wrapper import ToolWrapper
 
 class AccountBalanceInput(BaseModel):
     account_number: str = Field(..., description="Номер счета")
@@ -3046,12 +3214,32 @@ def reserve_parking_spot(parking_id: str, user_id: str) -> Dict[str, str]:
 # Словарь сервисов и их функций с соответствующими схемами ввода
 test_services = {
     "accounts": [
-        (get_account_balance, AccountBalanceInput),
-        (transfer_money, TransferMoneyInput)
+        ToolWrapper(
+            name="get_account_balance",
+            description="Получает баланс счета по номеру счета",
+            function=get_account_balance,
+            input_schema=AccountBalanceInput
+        ),
+        ToolWrapper(
+            name="transfer_money",
+            description="Переводит деньги с одного счета на другой",
+            function=transfer_money,
+            input_schema=TransferMoneyInput
+        )
     ],
     "parking": [
-        (get_parking_info, ParkingInfoInput),
-        (reserve_parking_spot, ReserveParkingSpotInput)
+        ToolWrapper(
+            name="get_parking_info",
+            description="Получает информацию о парковке по её ID",
+            function=get_parking_info,
+            input_schema=ParkingInfoInput
+        ),
+        ToolWrapper(
+            name="reserve_parking_spot",
+            description="Резервирует место на парковке для пользователя",
+            function=reserve_parking_spot,
+            input_schema=ReserveParkingSpotInput
+        )
     ]
 }
 
@@ -3060,33 +3248,31 @@ async def init_test_data(db):
     from .database.crud import get_or_create_service, save_tool
     from .tools.wrapper import ToolWrapper
 
-    for service_name, functions in test_services.items():
+    for service_name, tools in test_services.items():
         service = await get_or_create_service(db, service_name, f"Это сервис {service_name}", f"Документация для сервиса {service_name}")
         
-        for func, input_schema in functions:
-            tool_wrapper = ToolWrapper(
-                name=func.__name__,
-                description=func.__doc__ or "",
-                function=func,
-                input_schema=input_schema
-            )
-            await save_tool(db, tool_wrapper, service.id)
+        for tool in tools:
+            await save_tool(db, tool, service.id)
 
     print("Тестовые данные успешно инициализированы")
 
-
 run.py
 
+import asyncio
 from app.main import app
 from app.database.connection import AsyncSessionLocal
 from app.test_data import init_test_data
-import asyncio
+import uvicorn
 
 async def init_data():
     async with AsyncSessionLocal() as db:
         await init_test_data(db)
 
+async def main():
+    await init_data()
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
+    server = uvicorn.Server(config)
+    await server.serve()
+
 if __name__ == "__main__":
-    asyncio.run(init_data())
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    asyncio.run(main())

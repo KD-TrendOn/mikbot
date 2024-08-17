@@ -6,6 +6,7 @@ from ..services.llm import init_chat_model
 from ..database.crud import load_service_data, load_tools, load_vector_documents
 from ..tools.wrapper import create_tools
 from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage
 from langchain_core.prompts import PromptTemplate
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def create_worker_subgraph(service_name: str):
         bound = prompt | llm_with_tools
         response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
         logger.debug(f"LLM response received {response.content}")
-        return {"answer": response, "messages": [response]}
+        return {"answer": response, "messages": response}
 
     async def load_vector_docs_node(state: SubState):
         logger.debug(f"Loading vector documents for query: {state.user_input}")
@@ -105,12 +106,12 @@ def create_worker_subgraph(service_name: str):
         return END
 
     async def use_tool(state: SubState):
-        logger.debug("Using tool")
+        logger.debug(f"Using tool. State at the moment: {state.dict()}")
         tool_node = state.metadata.get("tool_node")
         if tool_node is None:
             logger.error("Tool node is None in use_tool")
             raise ValueError("Tool node is not available")
-        tool_results = await tool_node.ainvoke(state)
+        tool_results = await tool_node.ainvoke(state.dict())
         
         logger.debug("Processing tool results")
         processed_results = []
