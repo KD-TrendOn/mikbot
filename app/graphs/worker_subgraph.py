@@ -77,7 +77,7 @@ def create_worker_subgraph(service_name: str):
         bound = prompt | llm_with_tools
         response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
         logger.debug(f"LLM response received {response.content}")
-        return {"answer": response, "messages": response}
+        return {"answer": [response], "messages": response}
 
     async def load_vector_docs_node(state: SubState):
         logger.debug(f"Loading vector documents for query: {state.user_input}")
@@ -111,7 +111,11 @@ def create_worker_subgraph(service_name: str):
         if tool_node is None:
             logger.error("Tool node is None in use_tool")
             raise ValueError("Tool node is not available")
-        tool_results = await tool_node.ainvoke(state.dict())
+        tool_input = AIMessage(
+            content="",
+            tool_calls=state.messages[-1].tool_calls
+        )
+        tool_results = await tool_node.ainvoke({'messages':[tool_input]})
         
         logger.debug("Processing tool results")
         processed_results = []
@@ -125,7 +129,7 @@ def create_worker_subgraph(service_name: str):
                 processed_results.append(result)
         
         logger.debug(f"Processed {len(processed_results)} tool results")
-        return {"tool_results": processed_results}
+        return {'answer':processed_results}
 
     subgraph.add_node("use_tool", use_tool)
 
@@ -137,7 +141,7 @@ def create_worker_subgraph(service_name: str):
             END: END
         }
     )
-    subgraph.add_edge("use_tool", "process_message")
+    subgraph.add_edge("use_tool", END)
 
     logger.info(f"Worker subgraph for {service_name} created successfully")
     return subgraph.compile()
