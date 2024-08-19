@@ -15,7 +15,6 @@ langchain-community
 langchain-postgres
 langchain-text-splitters
 langgraph
-langgraph-checkpoint
 langsmith
 pydantic
 sentence-transformers
