@@ -19,3 +19,4 @@ langsmith
 pydantic
 sentence-transformers
 psycopg[binary,pool]
+dill
