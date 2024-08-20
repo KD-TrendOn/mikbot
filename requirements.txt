@@ -18,3 +18,4 @@ langgraph
 langsmith
 pydantic
 sentence-transformers
+psycopg[binary,pool]
