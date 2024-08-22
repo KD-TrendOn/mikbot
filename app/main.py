@@ -12,28 +12,49 @@ main_graph = create_main_graph()
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+from .database.crud import create_chat_message
 
 @app.post("/chat")
 async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
     try:
+        # Сохраняем сообщение пользователя
+        await create_chat_message(db, user_input.user_id, "user", {"message": user_input.user_input})
+
         initial_state = State(
             user_input=user_input.user_input,
             user_id=user_input.user_id,
-            metadata={"db": db}  # Не передавайте db здесь
+            metadata={"db": db}
         )
-        logger.debug(f"Initial state: {initial_state}")
         
         result = await main_graph.ainvoke(initial_state)
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(result)
-        # Обработка результата перед возвратом
+        
+        # Обработка результата
         pre_answer = result['answer'][0]
         if isinstance(pre_answer, ToolMessage):
             answer = json.loads(pre_answer.content)
-            return answer
+            # Сохраняем ответ бота
+            await create_chat_message(db, user_input.user_id, "bot", {
+                "service": result.get('service'),
+                "type": answer.get('result')[0],
+                "tool_call": answer.get('result')[1],
+                "message": answer.get('description')
+            })
+            return {
+                "tool_call": answer.get('result'),
+                "type": answer.get('result')[0],
+                "message": answer.get('description')
+            }
         else:
             answer = pre_answer.content
-            return answer
+            await create_chat_message(db, user_input.user_id, "bot", {
+                "service": result.get('service'),
+                "message": answer
+            })
+            return {
+                "tool_call": {},
+                "type":'text',
+                "message": answer
+            }
     except Exception as e:
         logger.exception("An error occurred during chat processing")
         raise HTTPException(status_code=500, detail=str(e))

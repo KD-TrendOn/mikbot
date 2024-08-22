@@ -2493,84 +2493,7 @@ chatbot/
 ├── requirements.txt
 └── README.md
 
-Далее укажу контент файлов:
-
-alembic/env.py
-import asyncio
-from logging.config import fileConfig
-
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from alembic import context
-
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
-config = context.config
-
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# add your model's MetaData object here
-# for 'autogenerate' support
-from app.database.models import Base
-target_metadata = Base.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
-
-def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode."""
-    url = config.get_main_option("sqlalchemy.url")
-    context.configure(
-        url=url,
-        target_metadata=target_metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
-    )
-
-    with context.begin_transaction():
-        context.run_migrations()
-
-def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
-
-    with context.begin_transaction():
-        context.run_migrations()
-
-async def run_async_migrations() -> None:
-    """In this scenario we need to create an Engine
-    and associate a connection with the context."""
-
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
-
-def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
-
-    asyncio.get_event_loop().run_until_complete(run_async_migrations())
-
-if context.is_offline_mode():
-    run_migrations_offline()
-else:
-    run_migrations_online()
-
-
 app/database/connection.py
-
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from ..config import settings
 
@@ -2584,7 +2507,6 @@ AsyncSessionLocal = async_sessionmaker(
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
-
 
 app/database/crud.py
 
@@ -2703,7 +2625,6 @@ async def load_vector_documents(service_name: str, query: str, k: int = 5):
     docs = await vectorstore.asimilarity_search_with_score(query, k=k, filter={"service": service_name})
     return docs
 
-
 app/database/models.py
 
 from sqlalchemy import Column, Integer, String, ForeignKey
@@ -2730,7 +2651,6 @@ class Tool(Base):
     service_id = Column(Integer, ForeignKey("services.id"))
 
 app/graphs/main_graph.py
-
 from langgraph.graph import StateGraph, END
 from ..schemas.state import State
 from ..services.router import service_router
@@ -2762,9 +2682,7 @@ def create_main_graph():
 
     return main_graph.compile()
 
-
 app/graphs/worker_subgraph.py
-
 import asyncio
 import logging
 from langgraph.graph import StateGraph, END, START
@@ -2844,7 +2762,7 @@ def create_worker_subgraph(service_name: str):
         bound = prompt | llm_with_tools
         response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
         logger.debug(f"LLM response received {response.content}")
-        return {"answer": response, "messages": response}
+        return {"answer": [response], "messages": response}
 
     async def load_vector_docs_node(state: SubState):
         logger.debug(f"Loading vector documents for query: {state.user_input}")
@@ -2913,7 +2831,6 @@ def create_worker_subgraph(service_name: str):
     logger.info(f"Worker subgraph for {service_name} created successfully")
     return subgraph.compile()
 
-
 app/schemas/state.py
 
 from typing import List, Dict, Any, Optional, Annotated
@@ -2943,7 +2860,6 @@ class RouterOutput(VBaseModel):
 class UserInput(BaseModel):
     user_input: str
     user_id: str
-
 
 app/services/document_manager.py
 
@@ -3001,7 +2917,6 @@ async def service_router(state: State, config: RunnableConfig) -> State:
     return state_dict
 
 app/services/vector_store.py
-
 from functools import lru_cache
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_postgres import PGVector
@@ -3026,9 +2941,7 @@ async def add_documents_to_vectorstore(documents, service_name):
     vectorstore = get_vectorstore()
     await vectorstore.aadd_documents(documents, metadatas=[{"service": service_name} for _ in documents])
 
-
 app/tools/base.py
-
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Callable
 from langchain_core.tools import tool
@@ -3108,9 +3021,7 @@ def create_tool_from_callable(tool_wrapper: ToolWrapper) -> BaseTool:
 def create_tools(tools: List[ToolWrapper]) -> List[BaseTool]:
     return [create_tool_from_callable(tool_wrapper) for tool_wrapper in tools]
 
-
 app/config.py
-
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 load_dotenv()
@@ -3134,14 +3045,14 @@ class Settings(BaseSettings):
 settings = Settings()
 
 app/main.py
-
 import logging
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from .database.connection import get_db
 from .graphs.main_graph import create_main_graph
 from .schemas.state import State, UserInput
-
+import json
+from langchain_core.messages import ToolMessage
 app = FastAPI()
 
 main_graph = create_main_graph()
@@ -3155,24 +3066,40 @@ async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
         initial_state = State(
             user_input=user_input.user_input,
             user_id=user_input.user_id,
-            metadata={"db": db}
+            metadata={"db": db}  # Не передавайте db здесь
         )
         logger.debug(f"Initial state: {initial_state}")
         
         result = await main_graph.ainvoke(initial_state)
-        return result
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(result)
+        # Обработка результата перед возвратом
+        pre_answer = result['answer'][0]
+        if isinstance(pre_answer, ToolMessage):
+            answer = json.loads(pre_answer.content)
+            return answer
+        else:
+            answer = pre_answer.content
+            return answer
     except Exception as e:
         logger.exception("An error occurred during chat processing")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Удалите эту функцию, так как она больше не нужна
-# @app.on_event("startup")
-# async def startup_event():
-#     loop = asyncio.get_event_loop()
-#     asyncio.set_event_loop(loop)
+def process_result(result):
+    # Здесь вы можете обработать результат, удалив несериализуемые объекты
+    # Например:
+    if isinstance(result, dict):
+        return {k: v for k, v in result.items() if is_serializable(v)}
+    return result
+
+def is_serializable(obj):
+    try:
+        json.dumps(obj)
+        return True
+    except (TypeError, OverflowError):
+        return False
 
 app/test_data.py
-
 from typing import Dict
 from pydantic import BaseModel, Field
 from .tools.wrapper import ToolWrapper
@@ -3282,3 +3209,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

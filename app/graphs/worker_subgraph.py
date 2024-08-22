@@ -54,6 +54,11 @@ def create_worker_subgraph(service_name: str):
         
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
         
+        chat_history = "\n".join([
+            f"{'User' if msg.sender_role == 'user' else 'Assistant'}: {msg.content.get('message', '')}"
+            for msg in state.chat_history[-5:]  # Последние 5 сообщений
+        ])
+        
         prompt_template = """You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
         
         Available tools:
@@ -68,14 +73,24 @@ def create_worker_subgraph(service_name: str):
         Additional context:
         {context}
         
+        Chat history:
+        {chat_history}
+        
         User input: {user_input}
         
         Please respond to the user's input using the available tools if necessary. 
         Remember to include a meaningful description for each tool use."""
+        
         prompt = PromptTemplate.from_template(prompt_template)
-        logger.debug(f"Invoking LLM with prompt: {prompt.format(service_name=service_name, tools_description=tools_description, service_data=service_data.documentation if service_data else 'No service data available', context=context, user_input = state.user_input)}")
         bound = prompt | llm_with_tools
-        response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
+        response = await bound.ainvoke({
+            "service_name": service_name,
+            "tools_description": tools_description,
+            "service_data": service_data.documentation if service_data else 'No service data available',
+            "context": context,
+            "chat_history": chat_history,
+            "user_input": state.user_input
+        })
         logger.debug(f"LLM response received {response.content}")
         return {"answer": [response], "messages": response}
 
