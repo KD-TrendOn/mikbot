@@ -86,7 +86,7 @@ def create_worker_subgraph(service_name: str):
         response = await bound.ainvoke({
             "service_name": service_name,
             "tools_description": tools_description,
-            "service_data": service_data.documentation if service_data else 'No service data available',
+            "service_data": service_data.prompt if service_data else 'No service data available',
             "context": context,
             "chat_history": chat_history,
             "user_input": state.user_input

@@ -6,13 +6,20 @@ from .graphs.main_graph import create_main_graph
 from .schemas.state import State, UserInput
 import json
 from langchain_core.messages import ToolMessage
+from .database.crud import create_chat_message
+from .services.router import update_router_parser
 app = FastAPI()
-
-main_graph = create_main_graph()
+main_graph = None
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-from .database.crud import create_chat_message
+
+@app.on_event("startup")
+async def startup_event():
+    global main_graph
+    db = next(get_db())
+    await update_router_parser(db)
+    main_graph = await create_main_graph(db)
 
 @app.post("/chat")
 async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
@@ -58,17 +65,3 @@ async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.exception("An error occurred during chat processing")
         raise HTTPException(status_code=500, detail=str(e))
-
-def process_result(result):
-    # Здесь вы можете обработать результат, удалив несериализуемые объекты
-    # Например:
-    if isinstance(result, dict):
-        return {k: v for k, v in result.items() if is_serializable(v)}
-    return result
-
-def is_serializable(obj):
-    try:
-        json.dumps(obj)
-        return True
-    except (TypeError, OverflowError):
-        return False

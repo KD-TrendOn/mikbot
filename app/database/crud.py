@@ -126,3 +126,8 @@ async def get_chat_history(db: AsyncSession, user_id: str, limit: int = 10) -> L
     query = select(models.ChatMessage).where(models.ChatMessage.user_id == user_id).order_by(models.ChatMessage.timestamp.desc()).limit(limit)
     result = await db.execute(query)
     return result.scalars().all()
+
+async def get_all_services(db: AsyncSession):
+    stmt = select(models.Service)
+    result = await db.execute(stmt)
+    return result.scalars().all()

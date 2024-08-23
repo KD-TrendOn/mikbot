@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional, Annotated
-from pydantic.v1 import BaseModel as VBaseModel, Field as VField
+from pydantic.v1 import BaseModel as VBaseModel, Field as VField, create_model
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -22,9 +22,16 @@ class SubState(VBaseModel):
     metadata: Dict[str, Any] = VField(default_factory=dict)
     chat_history: list = VField(default_factory=list)
 
-class RouterOutput(VBaseModel):
-    service: str
-
 class UserInput(BaseModel):
     user_input: str
     user_id: str
+
+def create_router_answer(service_names: List[str]):
+    return create_model(
+        'RouterAnswer',
+        answer=(str, Field(..., description="Points to service which is needed for user's request processing.")),
+        __config__=type('Config', (), {'use_enum_values': True})
+    )
+
+# Это будет обновляться при запуске приложения
+RouterAnswer = create_router_answer([])

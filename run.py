@@ -1,12 +1,13 @@
 import asyncio
-from app.main import app
+from app.main import app, startup_event
 from app.database.connection import AsyncSessionLocal
-from app.test_data import init_test_data
+from app.services.service_creator import init_real_services
 import uvicorn
 
 async def init_data():
     async with AsyncSessionLocal() as db:
-        await init_test_data(db)
+        await init_real_services(db)
+    await startup_event()
 
 async def main():
     await init_data()

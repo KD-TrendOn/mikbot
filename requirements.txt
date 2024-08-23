@@ -20,3 +20,5 @@ pydantic
 sentence-transformers
 psycopg[binary,pool]
 dill
+pandas
+pymupdf
