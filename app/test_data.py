@@ -188,7 +188,7 @@ def pie_chart(data_type: Literal["Income", "Expense"], time_period: Literal["las
             data = [{'object':i, 'value':int(df[df['category']==i]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
         else:
             data = [{'object':i, 'value':int(df[(df['category'] == i) & (df['date'] >= pd.Timestamp('20240406'))]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
-        return {"chartPieConfig":{"value":{"label":"Рублей"}},"data":data,"type":"chartPie"}
+        return {"chartPieConfig":{"value":{"label":"Рублей"}},"chartPieData":data,"type":"chartPie"}
     else:
         df = pd.read_csv("data.csv")
         number_of_colors = len(df["category"].unique())
@@ -200,7 +200,7 @@ def pie_chart(data_type: Literal["Income", "Expense"], time_period: Literal["las
             data = [{'object':i, 'value':int(df[df['category']==i]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
         else:
             data = [{'object':i, 'value':int(df[(df['category'] == i) & (df['date'] >= pd.Timestamp('20240406'))]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
-        return {"chartPieConfig":{"value":{"label":"Рублей"}},"data":data,"type":"chartPie"}
+        return {"chartPieConfig":{"value":{"label":"Рублей"}},"chartPieData":data,"type":"chartPie"}
 
 
 def line_chart(user_id: str):
