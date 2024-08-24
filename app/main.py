@@ -8,18 +8,19 @@ import json
 from langchain_core.messages import ToolMessage
 from .database.crud import create_chat_message
 from .services.router import update_router_parser
+from app.database.connection import AsyncSessionLocal
 app = FastAPI()
 main_graph = None
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
     global main_graph
-    db = next(get_db())
-    await update_router_parser(db)
-    main_graph = await create_main_graph(db)
+    async with AsyncSessionLocal() as db:
+        await update_router_parser(db)
+        main_graph = await create_main_graph(db)
 
 @app.post("/chat")
 async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
@@ -37,22 +38,28 @@ async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
         
         # Обработка результата
         pre_answer = result['answer'][0]
+        print(result)
         if isinstance(pre_answer, ToolMessage):
-            answer = json.loads(pre_answer.content)
+            answer:dict = json.loads(pre_answer.content)
             # Сохраняем ответ бота
+            print(answer)
+            resultt = answer.get('result', {})
+            tipe = resultt.pop("type")
+            description = answer.get('description', '')
             await create_chat_message(db, user_input.user_id, "bot", {
                 "service": result.get('service'),
-                "type": answer.get('result')[0],
-                "tool_call": answer.get('result')[1],
-                "message": answer.get('description')
+                "type": tipe,
+                "tool_call": resultt,
+                "message": description
             })
             return {
-                "tool_call": answer.get('result'),
-                "type": answer.get('result')[0],
-                "message": answer.get('description')
+                "tool_call": resultt,
+                "type": tipe,
+                "message": description
             }
         else:
             answer = pre_answer.content
+            print("!!!", answer)
             await create_chat_message(db, user_input.user_id, "bot", {
                 "service": result.get('service'),
                 "message": answer

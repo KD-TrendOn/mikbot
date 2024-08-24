@@ -18,6 +18,6 @@ def get_vectorstore() -> PGVector:
     )
     return vectorstore
 
-async def add_documents_to_vectorstore(documents, service_name):
+async def add_documents_to_vectorstore(documents):
     vectorstore = get_vectorstore()
-    await vectorstore.aadd_documents(documents, metadatas=[{"service": service_name} for _ in documents])
+    await vectorstore.aadd_documents(documents)

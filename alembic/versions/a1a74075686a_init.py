@@ -1,8 +1,8 @@
 """init
 
-Revision ID: d30d2dad80fe
+Revision ID: a1a74075686a
 Revises: 
-Create Date: 2024-08-22 20:56:03.039058
+Create Date: 2024-08-25 01:28:30.002665
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'd30d2dad80fe'
+revision: str = 'a1a74075686a'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -35,8 +35,8 @@ def upgrade() -> None:
     op.create_table('services',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('name', sa.String(), nullable=True),
-    sa.Column('prompt', sa.String(), nullable=True),
-    sa.Column('documentation', sa.String(), nullable=True),
+    sa.Column('prompt', sa.Text(), nullable=True),
+    sa.Column('documentation', sa.Text(), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_services_id'), 'services', ['id'], unique=False)
@@ -44,9 +44,9 @@ def upgrade() -> None:
     op.create_table('tools',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('name', sa.String(), nullable=True),
-    sa.Column('description', sa.String(), nullable=True),
-    sa.Column('function', sa.String(), nullable=True),
-    sa.Column('input_schema', sa.String(), nullable=True),
+    sa.Column('description', sa.Text(), nullable=True),
+    sa.Column('function', sa.Text(), nullable=True),
+    sa.Column('input_schema', sa.Text(), nullable=True),
     sa.Column('service_id', sa.Integer(), nullable=True),
     sa.ForeignKeyConstraint(['service_id'], ['services.id'], ),
     sa.PrimaryKeyConstraint('id')

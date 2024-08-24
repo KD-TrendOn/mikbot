@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, JSON, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, DateTime, Text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 import uuid
@@ -20,15 +20,15 @@ class Service(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
-    prompt = Column(String)
-    documentation = Column(String)
+    prompt = Column(Text)
+    documentation = Column(Text)
 
 class Tool(Base):
     __tablename__ = "tools"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
-    description = Column(String)
-    function = Column(String)
-    input_schema = Column(String)  # Добавляем это поле
+    description = Column(Text)
+    function = Column(Text)
+    input_schema = Column(Text)  # Добавляем это поле
     service_id = Column(Integer, ForeignKey("services.id"))

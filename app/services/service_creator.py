@@ -75,7 +75,7 @@ async def create_service(
     ]
 
     # Add documents to vector store
-    await add_documents_to_vectorstore(vector_docs, service_name)
+    await add_documents_to_vectorstore(vector_docs)
 
     # Save tools
     for tool in tools:
@@ -88,56 +88,180 @@ async def create_service(
 async def init_real_services(db: AsyncSession):
     from ..tools.wrapper import ToolWrapper
     from ..test_data import (
-        get_account_balance, transfer_money,
-        get_parking_info, reserve_parking_spot,
-        AccountBalanceInput, TransferMoneyInput,
-        ParkingInfoInput, ReserveParkingSpotInput
+        EmptyInput,SupportInput, PieChartInput, LineChartInput,
+        card_info_button,kindergarten_button, library_card_button,
+        taxes_payment_button, home_gas_payment_button, transfer_payment_button,
+        communal_services_button, traffic_fine_payment_button, balance_replenishment_button,
+        internet_replenishment_button, educational_card_replenishment_button, public_transport_card_replenishment_button,
+        pie_chart, line_chart, contact_tech_support
     )
 
     # Accounts service
     await create_service(
         db,
-        "Finance analyzer",
-        [],
+        "Финансовый аналитик",
+        ["Тарифный план Карта жителя РТ.pdf", "ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf"],
         [
             ToolWrapper(
-                name="get_account_balance",
-                description="Получает баланс счета по номеру счета",
-                function=get_account_balance,
-                input_schema=AccountBalanceInput
+                name="pie_chart",
+                description="Генерирует удобный pie график по какому то срезу транзакций пользователя",
+                function=pie_chart,
+                input_schema=PieChartInput
             ),
             ToolWrapper(
-                name="transfer_money",
-                description="Переводит деньги с одного счета на другой",
-                function=transfer_money,
-                input_schema=TransferMoneyInput
+                name="line_chart",
+                description="Генерирует удобный линейный график баланса пользователя. Помогает отследить тенденцию баланса пользователя.",
+                function=line_chart,
+                input_schema=LineChartInput
             )
         ],
-        prompt="Вы ассистент по банковским счетам. Помогите пользователю с вопросами о балансе и переводах.",
-        documentation="Подробная документация о работе с банковскими счетами..."
+        prompt="""Ты - помощник пользователя по финансам. Ты работаешь с двумя таблицами - таблицей расходов и таблицей доходов пользователя.
+        Схема таблиц выглядит так: date, amount, category.
+        Категории расходов и сумма затрат за весь учетный период:
+        Перевод 27955
+        Оплата Продуктовый 42044
+        Оплата Ресторан 23511
+        Оплата Аптека 12862
+        Онлайн оплата 7877
+        Оплата Развлечения 8755
+        Оплата Ювелирный 11230
+        Категории дохождов и сумма доходов за весь учетный период:
+        Перевод 93170
+        Заработная плата 450000
+        Кэшбек 77073
+        Стипендия 45000
+        Дивиденды 49474
+        Тебе даны функции для показа специальной статистики финансах пользователя.
+        Отвечай на вопросы относительно финансового плана и целей.
+        Если ситуация позволяет можешь предложить другую карту оформить.""",
+        documentation="Сервис для помощи пользователю с финансовым учетом и финансовыми целями и накоплениями."
     )
 
     # Parking service
     await create_service(
         db,
-        "parking",
-        [],
+        "Бот навигатор по приложению",
+        ["ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf", "ФЗ_395_1_О_банках_и_банковской_деятельности.docx"],
         [
             ToolWrapper(
-                name="get_parking_info",
-                description="Получает информацию о парковке по её ID",
-                function=get_parking_info,
-                input_schema=ParkingInfoInput
+                name="contact_tech_support",
+                description="Отправляет запрос на который тебе сложно было ответить в обращение в техподдержку",
+                function=contact_tech_support,
+                input_schema=SupportInput
             ),
             ToolWrapper(
-                name="reserve_parking_spot",
-                description="Резервирует место на парковке для пользователя",
-                function=reserve_parking_spot,
-                input_schema=ReserveParkingSpotInput
-            )
+                name="card_info_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с информацией по банковской карте",
+                function=card_info_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="kindergarten_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой детского сада",
+                function=kindergarten_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="library_card_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с читательским билетом",
+                function=library_card_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="taxes_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой налогов и штрафов",
+                function=taxes_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="home_gas_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой Газа по штрих коду",
+                function=home_gas_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="transfer_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с Переводом на другую карту",
+                function=transfer_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="communal_services_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой ЖКХ",
+                function=communal_services_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="traffic_fine_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой штрафов ГИБДД",
+                function=traffic_fine_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="balance_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением баланса карты",
+                function=balance_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="internet_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением интернет провайдера",
+                function=internet_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="educational_card_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой образовательной карты",
+                function=educational_card_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="public_transport_card_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой транспортной карты",
+                function=public_transport_card_replenishment_button,
+                input_schema=EmptyInput
+            ),
         ],
-        prompt="Вы ассистент по парковкам. Помогите пользователю найти информацию о парковках и зарезервировать место.",
-        documentation="Подробная документация о системе парковок..."
+        prompt="""Ты помощник пользователя по навигации в приложении.
+        Ты находишься в мобильном приложении для Android и IOS Карты жителя Республики Татарстан.
+        Карта жителя Татарстана - банковские и социальные сервисы в одном приложении
+        • Выпустите цифровую Карту жителя или закажите пластиковую карту с курьерской доставкой
+        • Получайте бонусы за рекомендацию карты жителя
+        • Выпустите карту жителя для себя и ребенка
+        • Отслеживайте операции по карте жителя и детской карте жителя
+        • Узнайте об акциях и специальных предложениях от наших партнёров в разделе "Акции"
+        • Узнайте, какие льготы вам положены, и подайте заявку на их получение
+        • Сохраните читательский билет Национальной библиотеки РТ в электронном формате
+        • Совершайте платежи без комиссии
+        • Сохраняйте образовательную карту ребенка в мобильном приложении и отслеживайте баланс по карте, а также расходы на питание в школьной столовой. Пополняйте образовательную карту в пару кликов с вашей карты жителя
+        • Объединяйте детскую карту жителя вашего ребенка с образовательной картой, ваш ребенок сможет использовать детскую карту жителя как в школе так и в торговых сетях
+        • Подключайте автопополнение образовательной карт и управляйте им прямо из приложения
+
+
+        Интерфейс приложения Карты жителя татарстан:
+        - Кнопка на нижней панели "Главное" cодержит в себе:
+            - Банковская карта
+            - Другие карты
+            - Портал "Забота". Социальные льготы и начисления
+            - Читательский билет. Сохранение читательского билета в электронном формате
+        - Кнопка на нижней панели "Платежи" содержит ссылки на оплату данных услуг:
+            - Детский сад
+            - Транспортная карта
+            - Обркарта
+            - ЖКХ
+            - Газ по штрих-коду
+            - Штрафы ГИБДД
+            - Налоги, штрафы, госплатежи
+            - Интернет
+            - Телевидение
+            - Домашний телефон
+        - Кнопка на нижней панели "Акции" содержит в себе:
+            - Список акций партнеров
+            - Карта с точками, магазинами партнеров и их акциями
+        - Кнопка на нижней панели "Новости" содержит в себе:
+            - Новости 
+        """,
+        documentation="Сервис помогающий с навигацией и основными вопросами по приложению. Также может обрабатывать запросы в техподдержку."
     )
 
     print("Реальные сервисы успешно инициализированы")

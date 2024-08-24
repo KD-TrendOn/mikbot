@@ -15,19 +15,19 @@ def create_worker_subgraph(service_name: str):
     subgraph = StateGraph(SubState)
 
     async def load_service_data_node(state: SubState):
-        logger.debug(f"Loading service data for {service_name}")
-        logger.debug(f"State metadata: {state.metadata}")
+        logger.error(f"Loading service data for {service_name}")
+        logger.error(f"State metadata: {state.metadata}")
         db = state.metadata.get("db")
         if db is None:
             logger.error("Database session is None in load_service_data_node")
             raise ValueError("Database session is not available")
         service_data = await asyncio.create_task(load_service_data(db, service_name))
-        logger.debug(f"Service data loaded: {service_data}")
+        logger.error(f"Service data loaded: {service_data}")
         return {"metadata": {**state.metadata, "service_data": service_data}}
 
     async def load_tools_node(state: SubState):
-        logger.debug(f"Loading tools for {service_name}")
-        logger.debug(f"State metadata: {state.metadata}")
+        logger.error(f"Loading tools for {service_name}")
+        logger.error(f"State metadata: {state.metadata}")
         db = state.metadata.get("db")
         if db is None:
             logger.error("Database session is None in load_tools_node")
@@ -39,11 +39,11 @@ def create_worker_subgraph(service_name: str):
         # Создаем описание инструментов для промпта
         tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
         
-        logger.debug(f"Tools loaded: {[tool.name for tool in tools]}")
+        logger.error(f"Tools loaded: {[tool.name for tool in tools]}")
         return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node, "tools_description": tools_description}}
 
     async def process_message(state: SubState):
-        logger.debug("Processing message")
+        logger.error("Processing message")
         service_data = state.metadata.get("service_data")
         tools = state.metadata.get("tools")
         tools_description = state.metadata.get("tools_description")
@@ -61,6 +61,8 @@ def create_worker_subgraph(service_name: str):
         
         prompt_template = """You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
         
+        ID пользователя:
+        {user_id}
         Available tools:
         {tools_description}
         
@@ -89,15 +91,16 @@ def create_worker_subgraph(service_name: str):
             "service_data": service_data.prompt if service_data else 'No service data available',
             "context": context,
             "chat_history": chat_history,
-            "user_input": state.user_input
+            "user_input": state.user_input,
+            "user_id":state.user_id
         })
-        logger.debug(f"LLM response received {response.content}")
+        logger.error(f"LLM response received {response.content}")
         return {"answer": [response], "messages": response}
 
     async def load_vector_docs_node(state: SubState):
-        logger.debug(f"Loading vector documents for query: {state.user_input}")
+        logger.error(f"Loading vector documents for query: {state.user_input}")
         docs = await load_vector_documents(service_name, state.user_input)
-        logger.debug(f"Vector documents loaded: {len(docs)} documents")
+        logger.error(f"Vector documents loaded: {len(docs)} documents")
         return {"metadata": {**state.metadata, "vector_docs": docs}}
     
 
@@ -112,16 +115,16 @@ def create_worker_subgraph(service_name: str):
     subgraph.add_edge("load_vector_docs", "process_message")
 
     def should_use_tool(state: SubState):
-        logger.debug("Checking if tool should be used")
+        logger.error("Checking if tool should be used")
         last_message = state.messages[-1]
         if last_message.tool_calls:
-            logger.debug("Tool call detected")
+            logger.error("Tool call detected")
             return "use_tool"
-        logger.debug("No tool call detected")
+        logger.error("No tool call detected")
         return END
 
     async def use_tool(state: SubState):
-        logger.debug(f"Using tool. State at the moment: {state.dict()}")
+        logger.error(f"Using tool. State at the moment: {state.dict()}")
         tool_node = state.metadata.get("tool_node")
         if tool_node is None:
             logger.error("Tool node is None in use_tool")
@@ -132,7 +135,7 @@ def create_worker_subgraph(service_name: str):
         )
         tool_results = await tool_node.ainvoke({'messages':[tool_input]})
         
-        logger.debug("Processing tool results")
+        logger.error("Processing tool results")
         processed_results = []
         for result in tool_results.get("messages", []):
             if isinstance(result, dict) and "result" in result and "description" in result:
@@ -143,7 +146,7 @@ def create_worker_subgraph(service_name: str):
             else:
                 processed_results.append(result)
         
-        logger.debug(f"Processed {len(processed_results)} tool results")
+        logger.error(f"Processed {len(processed_results)} tool results")
         return {'answer':processed_results}
 
     subgraph.add_node("use_tool", use_tool)

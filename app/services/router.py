@@ -4,7 +4,8 @@ from langchain_core.runnables import RunnableConfig
 from ..schemas.state import State, create_router_answer
 from .llm import init_chat_model
 from ..database.crud import get_all_services
-
+from langchain.pydantic_v1 import BaseModel, Field
+from typing import Literal
 router_parser = None
 
 async def update_router_parser(db):
@@ -14,6 +15,11 @@ async def update_router_parser(db):
     RouterAnswer = create_router_answer(service_names)
     router_parser = PydanticOutputParser(pydantic_object=RouterAnswer)
 
+class DullRouterAnswer(BaseModel):
+    answer:Literal["Финансовый аналитик", "Бот навигатор по приложению"] = Field(description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'")
+
+
+dull_router_parser = PydanticOutputParser(pydantic_object=DullRouterAnswer)
 async def service_router(state: State, config: RunnableConfig) -> State:
     db = state.metadata.get("db")
     if db is None:
@@ -50,11 +56,11 @@ async def service_router(state: State, config: RunnableConfig) -> State:
     prompt = PromptTemplate(
         template=prompt_template,
         input_variables=["services_description", "chat_history", "user_input"],
-        partial_variables={"format_instructions": router_parser.get_format_instructions()}
+        partial_variables={"format_instructions": dull_router_parser.get_format_instructions()}
     )
     
     llm = init_chat_model(mode="light")
-    chain = prompt | llm | router_parser
+    chain = prompt | llm | dull_router_parser
     
     # Подготовим историю чата для промпта
     chat_history = ""

@@ -17,6 +17,7 @@ class State(VBaseModel):
 class SubState(VBaseModel):
     messages: Annotated[List[AnyMessage], add_messages] = VField(default_factory=list)
     user_input: str
+    user_id: str
     answer: Any = None
     service: Optional[str] = None
     metadata: Dict[str, Any] = VField(default_factory=dict)

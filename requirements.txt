@@ -22,3 +22,4 @@ psycopg[binary,pool]
 dill
 pandas
 pymupdf
+docx2txt
