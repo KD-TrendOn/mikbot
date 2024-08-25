@@ -8,7 +8,11 @@ from ..tools.wrapper import create_tools
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import PromptTemplate
+from langfuse.callback import CallbackHandler
+
+langfuse_handler = CallbackHandler()
 logger = logging.getLogger(__name__)
+
 
 def create_worker_subgraph(service_name: str):
     logger.info(f"Creating worker subgraph for service: {service_name}")
@@ -35,12 +39,21 @@ def create_worker_subgraph(service_name: str):
         tool_wrappers = await asyncio.create_task(load_tools(db, service_name))
         tools = create_tools(tool_wrappers)
         tool_node = ToolNode(tools)
-        
+
         # Создаем описание инструментов для промпта
-        tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
-        
+        tools_description = "\n".join(
+            [f"- {tool.name}: {tool.description}" for tool in tools]
+        )
+
         logger.error(f"Tools loaded: {[tool.name for tool in tools]}")
-        return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node, "tools_description": tools_description}}
+        return {
+            "metadata": {
+                **state.metadata,
+                "tools": tools,
+                "tool_node": tool_node,
+                "tools_description": tools_description,
+            }
+        }
 
     async def process_message(state: SubState):
         logger.error("Processing message")
@@ -48,52 +61,60 @@ def create_worker_subgraph(service_name: str):
         tools = state.metadata.get("tools")
         tools_description = state.metadata.get("tools_description")
         vector_docs = state.metadata.get("vector_docs", [])
-        
-        llm = init_chat_model(mode="main")
+
+        llm = init_chat_model(mode="light")
         llm_with_tools = llm.bind_tools(tools)
-        
+
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
-        
-        chat_history = "\n".join([
-            f"{'User' if msg.sender_role == 'user' else 'Assistant'}: {msg.content.get('message', '')}"
-            for msg in state.chat_history[-5:]  # Последние 5 сообщений
-        ])
-        
-        prompt_template = """You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
+
+        chat_history = "\n".join(
+            [
+                f"{'User' if msg.sender_role == 'user' else 'Assistant'}: {msg.content.get('message', '')}"
+                for msg in state.chat_history[-5:]  # Последние 5 сообщений
+            ]
+        )
+
+        prompt_template = """Ты ассистент сервиса {service_name} в приложении Карта Жителя Татарстана.
         
         ID пользователя:
         {user_id}
-        Available tools:
+        :
         {tools_description}
         
-        For each tool, you must provide a 'description' field in addition to the required arguments. 
-        This description should be a brief explanation of the action being taken, which will be shown to the user.
+        Для каждого инструмента, вы должны предоставить поле 'description'  в дополнение к обязательным аргументам.
+        'description' должен быть кратким, и правдиво и честно описывать, как данный инструмент может быть полезен пользователю. 
         
-        Service context:
+        Описание сервиса:
         {service_data}
         
-        Additional context:
+        Контекст, который может быть тебе полезен:
         {context}
         
-        Chat history:
+        История чата:
         {chat_history}
         
-        User input: {user_input}
+        Запрос пользователя: {user_input}
         
-        Please respond to the user's input using the available tools if necessary. 
-        Remember to include a meaningful description for each tool use."""
-        
+        Пожалуйста отвечай на запрос пользователя используя инструмент, если это необходимо.
+        При вызове функции исключи любой другой текст, кроме 'description'.
+        Если ты вызываешь инструмент, ответ пользователю пиши в 'description'."""
+
         prompt = PromptTemplate.from_template(prompt_template)
         bound = prompt | llm_with_tools
-        response = await bound.ainvoke({
-            "service_name": service_name,
-            "tools_description": tools_description,
-            "service_data": service_data.prompt if service_data else 'No service data available',
-            "context": context,
-            "chat_history": chat_history,
-            "user_input": state.user_input,
-            "user_id":state.user_id
-        })
+        response = await bound.ainvoke(
+            {
+                "service_name": service_name,
+                "tools_description": tools_description,
+                "service_data": (
+                    service_data.prompt if service_data else "No service data available"
+                ),
+                "context": context,
+                "chat_history": chat_history,
+                "user_input": state.user_input,
+                "user_id": state.user_id,
+            },
+            config={"callbacks": [langfuse_handler]},
+        )
         logger.error(f"LLM response received {response.content}")
         return {"answer": [response], "messages": response}
 
@@ -102,7 +123,6 @@ def create_worker_subgraph(service_name: str):
         docs = await load_vector_documents(service_name, state.user_input)
         logger.error(f"Vector documents loaded: {len(docs)} documents")
         return {"metadata": {**state.metadata, "vector_docs": docs}}
-    
 
     subgraph.add_node("load_service_data", load_service_data_node)
     subgraph.add_node("load_tools", load_tools_node)
@@ -129,35 +149,30 @@ def create_worker_subgraph(service_name: str):
         if tool_node is None:
             logger.error("Tool node is None in use_tool")
             raise ValueError("Tool node is not available")
-        tool_input = AIMessage(
-            content="",
-            tool_calls=state.messages[-1].tool_calls
-        )
-        tool_results = await tool_node.ainvoke({'messages':[tool_input]})
-        
+        tool_input = AIMessage(content="", tool_calls=state.messages[-1].tool_calls)
+        tool_results = await tool_node.ainvoke({"messages": [tool_input]})
+
         logger.error("Processing tool results")
         processed_results = []
         for result in tool_results.get("messages", []):
-            if isinstance(result, dict) and "result" in result and "description" in result:
-                processed_results.append({
-                    "result": result["result"],
-                    "description": result["description"]
-                })
+            if (
+                isinstance(result, dict)
+                and "result" in result
+                and "description" in result
+            ):
+                processed_results.append(
+                    {"result": result["result"], "description": result["description"]}
+                )
             else:
                 processed_results.append(result)
-        
+
         logger.error(f"Processed {len(processed_results)} tool results")
-        return {'answer':processed_results}
+        return {"answer": processed_results}
 
     subgraph.add_node("use_tool", use_tool)
 
     subgraph.add_conditional_edges(
-        "process_message",
-        should_use_tool,
-        {
-            "use_tool": "use_tool",
-            END: END
-        }
+        "process_message", should_use_tool, {"use_tool": "use_tool", END: END}
     )
     subgraph.add_edge("use_tool", END)
 

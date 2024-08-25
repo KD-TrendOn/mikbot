@@ -1,8 +1,15 @@
 import os
 from typing import List, Dict
 from langchain.document_loaders import (
-    CSVLoader, JSONLoader, Docx2txtLoader, UnstructuredExcelLoader,
-    PyMuPDFLoader, TextLoader, UnstructuredPowerPointLoader, NotebookLoader, BSHTMLLoader
+    CSVLoader,
+    JSONLoader,
+    Docx2txtLoader,
+    UnstructuredExcelLoader,
+    PyMuPDFLoader,
+    TextLoader,
+    UnstructuredPowerPointLoader,
+    NotebookLoader,
+    BSHTMLLoader,
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -12,9 +19,11 @@ from ..database.crud import get_or_create_service, save_tool
 from ..services.vector_store import add_documents_to_vectorstore
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..services.router import update_router_parser
+
+
 class DataAbstraction:
     def __init__(self, filename: str):
-        self.type = filename.split('.')[-1]
+        self.type = filename.split(".")[-1]
         self.filename = filename
         self.sql_like = self.type in ["csv", "json", "xlsx"]
 
@@ -28,7 +37,7 @@ class DataAbstraction:
             "txt": TextLoader,
             "pptx": UnstructuredPowerPointLoader,
             "ipynb": NotebookLoader,
-            "html": BSHTMLLoader
+            "html": BSHTMLLoader,
         }
         loader_class = loaders.get(self.type, TextLoader)
         if self.type == "json":
@@ -43,39 +52,40 @@ class DataAbstraction:
             return pd.read_csv(self.filename)
         return None
 
+
 async def create_service(
     db: AsyncSession,
     service_name: str,
     file_paths: List[str],
     tools: List[ToolWrapper],
     prompt: str,
-    documentation: str
+    documentation: str,
 ):
     # Create or get the service
     service = await get_or_create_service(db, service_name, prompt, documentation)
 
-    # Process documents
-    all_docs = []
-    for file_path in file_paths:
-        data = DataAbstraction(file_path)
-        docs = data.get_loader()
-        all_docs.extend(docs)
+    # # Process documents
+    # all_docs = []
+    # for file_path in file_paths:
+    #     data = DataAbstraction(file_path)
+    #     docs = data.get_loader()
+    #     all_docs.extend(docs)
 
-    # Split documents
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=200)
-    splits = text_splitter.split_documents(all_docs)
+    # # Split documents
+    # text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=200)
+    # splits = text_splitter.split_documents(all_docs)
 
-    # Prepare documents for vector store
-    vector_docs = [
-        Document(
-            page_content=split.page_content,
-            metadata={**split.metadata, "service": service_name}
-        )
-        for split in splits
-    ]
+    # # Prepare documents for vector store
+    # vector_docs = [
+    #     Document(
+    #         page_content=split.page_content,
+    #         metadata={**split.metadata, "service": service_name},
+    #     )
+    #     for split in splits
+    # ]
 
-    # Add documents to vector store
-    await add_documents_to_vectorstore(vector_docs)
+    # # Add documents to vector store
+    # await add_documents_to_vectorstore(vector_docs)
 
     # Save tools
     for tool in tools:
@@ -84,36 +94,53 @@ async def create_service(
 
     return service
 
+
 # Делаем анализатора финансов, автокнопку, техподдержку
 async def init_real_services(db: AsyncSession):
     from ..tools.wrapper import ToolWrapper
     from ..test_data import (
-        EmptyInput,SupportInput, PieChartInput, LineChartInput,
-        card_info_button,kindergarten_button, library_card_button,
-        taxes_payment_button, home_gas_payment_button, transfer_payment_button,
-        communal_services_button, traffic_fine_payment_button, balance_replenishment_button,
-        internet_replenishment_button, educational_card_replenishment_button, public_transport_card_replenishment_button,
-        pie_chart, line_chart, contact_tech_support
+        EmptyInput,
+        SupportInput,
+        PieChartInput,
+        LineChartInput,
+        card_info_button,
+        kindergarten_button,
+        library_card_button,
+        taxes_payment_button,
+        home_gas_payment_button,
+        transfer_payment_button,
+        communal_services_button,
+        traffic_fine_payment_button,
+        balance_replenishment_button,
+        internet_replenishment_button,
+        educational_card_replenishment_button,
+        public_transport_card_replenishment_button,
+        pie_chart,
+        line_chart,
+        contact_tech_support,
     )
 
     # Accounts service
     await create_service(
         db,
         "Анализ доходов и расходов и советы по финансовому плану",
-        ["Тарифный план Карта жителя РТ.pdf", "ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf"],
+        [
+            "Тарифный план Карта жителя РТ.pdf",
+            "ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf",
+        ],
         [
             ToolWrapper(
                 name="pie_chart",
                 description="Генерирует удобный pie график по какому то срезу транзакций пользователя",
                 function=pie_chart,
-                input_schema=PieChartInput
+                input_schema=PieChartInput,
             ),
             ToolWrapper(
                 name="line_chart",
                 description="Генерирует удобный линейный график баланса пользователя. Помогает отследить тенденцию баланса пользователя.",
                 function=line_chart,
-                input_schema=LineChartInput
-            )
+                input_schema=LineChartInput,
+            ),
         ],
         prompt="""Ты - помощник пользователя по финансам. Ты работаешь с двумя таблицами - таблицей расходов и таблицей доходов пользователя.
         Схема таблиц выглядит так: date, amount, category.
@@ -134,12 +161,12 @@ async def init_real_services(db: AsyncSession):
         Тебе даны функции для показа специальной статистики финансах пользователя.
         Отвечай на вопросы относительно финансового плана и целей.
         Если ситуация позволяет можешь предложить другую карту оформить.
-        Важно: поле description каждой функции будет показано пользователю после выполнения функции. 
+        Важно: поле description каждой функции будет показано пользователю после выполнения функции.
         Используй это поле, чтобы продолжить диалог с пользователем, объяснить результаты и предложить дальнейшие действия. Например указать крупнейшую по сумме категорию, сделать вывод из тенденции или баланса счета пользователя.""",
-        documentation="""Сервис для помощи пользователю с финансовым учетом и финансовыми целями и накоплениями. 
-        Этот сервис НЕ выполняет операции по переводу денег или оплате услуг. 
+        documentation="""Сервис для помощи пользователю с финансовым учетом и финансовыми целями и накоплениями.
+        Этот сервис НЕ выполняет операции по переводу денег или оплате услуг.
         Он занимается анализом доходов и расходов, предоставлением статистики и советами по финансовому планированию.
-        
+
         Примеры запросов, которые обрабатывает этот сервис:
         - Покажи мои расходы за последний месяц
         - Сколько я потратил на продукты в этом году?
@@ -147,92 +174,95 @@ async def init_real_services(db: AsyncSession):
         - Помоги составить финансовый план на следующий месяц
         - Как мне сократить расходы?
         - Сколько я могу откладывать ежемесячно?
-        - Покажи динамику моего баланса за последние полгода"""
+        - Покажи динамику моего баланса за последние полгода""",
     )
 
     # Parking service
     await create_service(
         db,
         "Бот навигатор по приложению",
-        ["ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf", "ФЗ_395_1_О_банках_и_банковской_деятельности.docx"],
+        [
+            "ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf",
+            "ФЗ_395_1_О_банках_и_банковской_деятельности.docx",
+        ],
         [
             ToolWrapper(
                 name="contact_tech_support",
                 description="Отправляет запрос на который тебе сложно было ответить в обращение в техподдержку",
                 function=contact_tech_support,
-                input_schema=SupportInput
+                input_schema=SupportInput,
             ),
             ToolWrapper(
                 name="card_info_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с информацией по банковской карте",
                 function=card_info_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="kindergarten_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой детского сада",
                 function=kindergarten_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="library_card_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с читательским билетом",
                 function=library_card_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="taxes_payment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой налогов и штрафов",
                 function=taxes_payment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="home_gas_payment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой Газа по штрих коду",
                 function=home_gas_payment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="transfer_payment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с Переводом на другую карту",
                 function=transfer_payment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="communal_services_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой ЖКХ",
                 function=communal_services_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="traffic_fine_payment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой штрафов ГИБДД",
                 function=traffic_fine_payment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="balance_replenishment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением баланса карты",
                 function=balance_replenishment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="internet_replenishment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением интернет провайдера",
                 function=internet_replenishment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="educational_card_replenishment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой образовательной карты",
                 function=educational_card_replenishment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
             ToolWrapper(
                 name="public_transport_card_replenishment_button",
                 description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой транспортной карты",
                 function=public_transport_card_replenishment_button,
-                input_schema=EmptyInput
+                input_schema=EmptyInput,
             ),
         ],
         prompt="""Ты помощник пользователя по навигации в приложении.
@@ -288,7 +318,7 @@ async def init_real_services(db: AsyncSession):
         - Где найти акции партнеров?
         - Как связаться с техподдержкой?
         - Как перевести деньги на другую карту?
-        - Где посмотреть мои льготы?"""
+        - Где посмотреть мои льготы?""",
     )
 
     print("Реальные сервисы успешно инициализированы")

@@ -6,7 +6,11 @@ from .llm import init_chat_model
 from ..database.crud import get_all_services
 from langchain.pydantic_v1 import BaseModel, Field
 from typing import Literal
+from langfuse.callback import CallbackHandler
+
+langfuse_handler = CallbackHandler()
 router_parser = None
+
 
 async def update_router_parser(db):
     global router_parser
@@ -15,11 +19,19 @@ async def update_router_parser(db):
     RouterAnswer = create_router_answer(service_names)
     router_parser = PydanticOutputParser(pydantic_object=RouterAnswer)
 
+
 class DullRouterAnswer(BaseModel):
-    answer:Literal["Анализ доходов и расходов и советы по финансовому плану", "Бот навигатор по приложению"] = Field(description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'")
+    answer: Literal[
+        "Анализ доходов и расходов и советы по финансовому плану",
+        "Бот навигатор по приложению",
+    ] = Field(
+        description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'"
+    )
 
 
 dull_router_parser = PydanticOutputParser(pydantic_object=DullRouterAnswer)
+
+
 async def service_router(state: State, config: RunnableConfig) -> State:
     db = state.metadata.get("db")
     if db is None:
@@ -30,10 +42,12 @@ async def service_router(state: State, config: RunnableConfig) -> State:
 
     # Получаем все сервисы из базы данных
     services = await get_all_services(db)
-    
+
     # Создаем строку с описанием всех сервисов
-    services_description = "\n".join([f"- {service.name}: {service.documentation}" for service in services])
-    
+    services_description = "\n".join(
+        [f"- {service.name}: {service.documentation}" for service in services]
+    )
+
     # Создаем список названий сервисов для использования в инструкциях формата
     service_names = [service.name for service in services]
 
@@ -64,37 +78,44 @@ async def service_router(state: State, config: RunnableConfig) -> State:
 
 Используй следующий формат для своего ответа: {format_instructions}
 """
-    
+
     prompt = PromptTemplate(
         template=prompt_template,
         input_variables=["services_description", "chat_history", "user_input"],
-        partial_variables={"format_instructions": dull_router_parser.get_format_instructions()}
+        partial_variables={
+            "format_instructions": dull_router_parser.get_format_instructions()
+        },
     )
-    
+
     llm = init_chat_model(mode="light")
     chain = prompt | llm | dull_router_parser
-    
+
     # Подготовим историю чата для промпта
     chat_history = ""
     for message in state.chat_history[-5:]:  # Берем последние 5 сообщений
         role = "User" if message.sender_role == "user" else "Assistant"
-        content = message.content.get('message', '')
-        service = message.content.get('service', '')
+        content = message.content.get("message", "")
+        service = message.content.get("service", "")
         chat_history += f"{role}: {content}\n"
         if service:
             chat_history += f"(Service used: {service})\n"
-    
-    result = await chain.ainvoke({
-        "services_description": services_description,
-        "chat_history": chat_history,
-        "user_input": state.user_input
-    })
-    
+
+    result = await chain.ainvoke(
+        {
+            "services_description": services_description,
+            "chat_history": chat_history,
+            "user_input": state.user_input,
+        },
+        config={"callbacks": [langfuse_handler]},
+    )
+
     # Проверяем, что выбранный сервис существует
     if result.answer not in service_names:
-        raise ValueError(f"Selected service '{result.answer}' is not in the list of available services")
+        raise ValueError(
+            f"Selected service '{result.answer}' is not in the list of available services"
+        )
 
     # Обновляем существующее состояние
     state_dict = state.dict()
-    state_dict['service'] = result.answer
+    state_dict["service"] = result.answer
     return state_dict
