@@ -24,8 +24,9 @@ class DullRouterAnswer(BaseModel):
     answer: Literal[
         "Анализ доходов и расходов и советы по финансовому плану",
         "Бот навигатор по приложению",
+        "Всё остальное" "",
     ] = Field(
-        description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'"
+        description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению' либо 'Всё остальное'"
     )
 
 
@@ -87,7 +88,7 @@ async def service_router(state: State, config: RunnableConfig) -> State:
         },
     )
 
-    llm = init_chat_model(mode="light")
+    llm = init_chat_model(mode="main")
     chain = prompt | llm | dull_router_parser
 
     # Подготовим историю чата для промпта

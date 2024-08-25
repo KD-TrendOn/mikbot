@@ -62,7 +62,7 @@ def create_worker_subgraph(service_name: str):
         tools_description = state.metadata.get("tools_description")
         vector_docs = state.metadata.get("vector_docs", [])
 
-        llm = init_chat_model(mode="light")
+        llm = init_chat_model(mode="main")
         llm_with_tools = llm.bind_tools(tools)
 
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
@@ -95,9 +95,11 @@ def create_worker_subgraph(service_name: str):
         
         Запрос пользователя: {user_input}
         
-        Пожалуйста отвечай на запрос пользователя используя инструмент, если это необходимо.
+        Если новый запрос пользователя не относиться к предыдущим сообщениям, а такое часто бывает, игнорируй историю сообщений и выполняй то, что просит пользователь. 
+        Ответь на запрос пользователя или, если пользователь просит сделать действие, вызови инструмент.
         При вызове функции исключи любой другой текст, кроме 'description'.
-        Если ты вызываешь инструмент, ответ пользователю пиши в 'description'."""
+        Если ты вызываешь инструмент, ответ пользователю пиши в 'description'.
+        Если ответ пользователя не просит вызова функции, ответь пользователю как человек - человеку."""
 
         prompt = PromptTemplate.from_template(prompt_template)
         bound = prompt | llm_with_tools
@@ -120,8 +122,9 @@ def create_worker_subgraph(service_name: str):
 
     async def load_vector_docs_node(state: SubState):
         logger.error(f"Loading vector documents for query: {state.user_input}")
-        docs = await load_vector_documents(service_name, state.user_input)
-        logger.error(f"Vector documents loaded: {len(docs)} documents")
+        # docs = await load_vector_documents(service_name, state.user_input)
+        # logger.error(f"Vector documents loaded: {len(docs)} documents")
+        docs = []
         return {"metadata": {**state.metadata, "vector_docs": docs}}
 
     subgraph.add_node("load_service_data", load_service_data_node)

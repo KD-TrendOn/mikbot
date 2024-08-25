@@ -3,11 +3,11 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_postgres import PGVector
 from ..config import settings
 
+
 @lru_cache
 def get_vectorstore() -> PGVector:
     embeddings = HuggingFaceEmbeddings(
-        model_name=settings.EMBEDDINGS_MODEL,
-        model_kwargs={"device": settings.DEVICE}
+        model_name=settings.EMBEDDINGS_MODEL, model_kwargs={"device": settings.DEVICE}
     )
     vectorstore = PGVector(
         embeddings=embeddings,
@@ -17,6 +17,7 @@ def get_vectorstore() -> PGVector:
         async_mode=True,
     )
     return vectorstore
+
 
 async def add_documents_to_vectorstore(documents):
     vectorstore = get_vectorstore()
