@@ -16,7 +16,7 @@ async def update_router_parser(db):
     router_parser = PydanticOutputParser(pydantic_object=RouterAnswer)
 
 class DullRouterAnswer(BaseModel):
-    answer:Literal["Финансовый аналитик", "Бот навигатор по приложению"] = Field(description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'")
+    answer:Literal["Анализ доходов и расходов и советы по финансовому плану", "Бот навигатор по приложению"] = Field(description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'")
 
 
 dull_router_parser = PydanticOutputParser(pydantic_object=DullRouterAnswer)
@@ -37,21 +37,33 @@ async def service_router(state: State, config: RunnableConfig) -> State:
     # Создаем список названий сервисов для использования в инструкциях формата
     service_names = [service.name for service in services]
 
-    prompt_template = """You are a service router for the Tatarstan Resident Card application. 
-    Determine which service the user's request is related to from the following list of available services:
-    {services_description}
+    prompt_template = """Ты - умный маршрутизатор запросов в приложении "Карта жителя Республики Татарстан". Твоя задача - определить, какой сервис лучше всего подходит для обработки запроса пользователя.
 
-    Use the following format for your answer: {format_instructions}
+Приложение "Карта жителя РТ" - это многофункциональное приложение, которое объединяет банковские и социальные сервисы. Пользователи обычно заходят в приложение, чтобы:
+1. Проверить баланс и историю операций по карте
+2. Совершить платежи (ЖКХ, детский сад, штрафы, налоги и т.д.)
+3. Перевести деньги
+4. Посмотреть доступные льготы и акции
+5. Получить информацию о своих картах (банковской, транспортной, образовательной)
+6. Проанализировать свои доходы и расходы
+7. Получить помощь по использованию приложения
 
-    Chat history:
-    {chat_history}
+Доступные сервисы и их описания:
+{services_description}
 
-    Current user's input: {user_input}
+Внимательно проанализируй запрос пользователя и выбери наиболее подходящий сервис на основе их описаний.
 
-    Based on the chat history, the current user's input, and the available services, determine the most appropriate service.
-    If this is the first message in the conversation, or if the topic has clearly changed, choose the service that best matches the current input.
-    If the conversation is continuing on the same topic, prefer to use the same service as the last message unless the topic has clearly changed.
-    """
+История чата:
+{chat_history}
+
+Текущий запрос пользователя: {user_input}
+
+На основе истории чата, текущего запроса пользователя и описания сервисов, определи наиболее подходящий сервис.
+Если это первое сообщение в разговоре или если тема явно изменилась, выбери сервис, который лучше всего соответствует текущему запросу.
+Если разговор продолжается на ту же тему, предпочти использовать тот же сервис, что и в последнем сообщении, если только тема явно не изменилась.
+
+Используй следующий формат для своего ответа: {format_instructions}
+"""
     
     prompt = PromptTemplate(
         template=prompt_template,

@@ -2476,6 +2476,7 @@ chatbot/
 │   │   ├── router.py
 │   │   ├── document_manager.py
 │   │   ├── vector_store.py
+│   │   ├── service_creator.py
 │   │   └── llm.py
 │   ├── tools/
 │   │   ├── __init__.py
@@ -2518,6 +2519,8 @@ from ..tools.wrapper import ToolWrapper
 import dill
 from typing import List, Callable, Optional
 from ..services.vector_store import get_vectorstore
+from typing import List, Dict, Any
+from datetime import datetime
 
 def serialize_function(func: Callable) -> str:
     return dill.dumps(func).hex()
@@ -2625,64 +2628,107 @@ async def load_vector_documents(service_name: str, query: str, k: int = 5):
     docs = await vectorstore.asimilarity_search_with_score(query, k=k, filter={"service": service_name})
     return docs
 
-app/database/models.py
+async def create_chat_message(db: AsyncSession, user_id: str, sender_role: str, content: Dict[str, Any]) -> models.ChatMessage:
+    db_message = models.ChatMessage(user_id=user_id, sender_role=sender_role, content=content)
+    db.add(db_message)
+    await db.commit()
+    await db.refresh(db_message)
+    return db_message
 
-from sqlalchemy import Column, Integer, String, ForeignKey
+async def get_chat_history(db: AsyncSession, user_id: str, limit: int = 10) -> List[models.ChatMessage]:
+    query = select(models.ChatMessage).where(models.ChatMessage.user_id == user_id).order_by(models.ChatMessage.timestamp.desc()).limit(limit)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def get_all_services(db: AsyncSession):
+    stmt = select(models.Service)
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+app/database/models.py
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, DateTime, Text
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.sql import func
+import uuid
 
 Base = declarative_base()
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(String, unique=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(String, index=True)
+    sender_role = Column(String)
+    content = Column(JSON)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
 class Service(Base):
     __tablename__ = "services"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
-    prompt = Column(String)
-    documentation = Column(String)
+    prompt = Column(Text)
+    documentation = Column(Text)
 
 class Tool(Base):
     __tablename__ = "tools"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
-    description = Column(String)
-    function = Column(String)
-    input_schema = Column(String)  # Добавляем это поле
+    description = Column(Text)
+    function = Column(Text)
+    input_schema = Column(Text)  # Добавляем это поле
     service_id = Column(Integer, ForeignKey("services.id"))
 
 app/graphs/main_graph.py
+
 from langgraph.graph import StateGraph, END
 from ..schemas.state import State
 from ..services.router import service_router
 from .worker_subgraph import create_worker_subgraph
+from ..database.crud import get_chat_history, get_all_services
 
-def create_main_graph():
+async def load_chat_history(state: State):
+    db = state.metadata.get("db")
+    if db is None:
+        raise ValueError("Database session is not available")
+    
+    history = await get_chat_history(db, state.user_id)
+    return {"chat_history": history}
+
+async def create_main_graph(db):
     main_graph = StateGraph(State)
     
+    main_graph.add_node("load_chat_history", load_chat_history)
     main_graph.add_node("service_router", service_router)
     
-    services = ["accounts", "parking"]
-    for service in services:
-        main_graph.add_node(service, create_worker_subgraph(service))
+    # Получаем все сервисы из базы данных
+    services = await get_all_services(db)
+    service_names = [service.name for service in services]
+    
+    for service_name in service_names:
+        main_graph.add_node(service_name, create_worker_subgraph(service_name))
 
-    main_graph.set_entry_point("service_router")
+    main_graph.set_entry_point("load_chat_history")
+    main_graph.add_edge("load_chat_history", "service_router")
 
     def route_to_service(state: State):
-        # Убедимся, что db передается дальше
-        return state.service if state.service in services else END
+        return state.service if state.service in service_names else END
 
     main_graph.add_conditional_edges(
         "service_router",
         route_to_service,
-        {service: service for service in services}
+        {service_name: service_name for service_name in service_names}
     )
 
-    for service in services:
-        main_graph.add_edge(service, END)
+    for service_name in service_names:
+        main_graph.add_edge(service_name, END)
 
     return main_graph.compile()
 
 app/graphs/worker_subgraph.py
+
 import asyncio
 import logging
 from langgraph.graph import StateGraph, END, START
@@ -2700,19 +2746,19 @@ def create_worker_subgraph(service_name: str):
     subgraph = StateGraph(SubState)
 
     async def load_service_data_node(state: SubState):
-        logger.debug(f"Loading service data for {service_name}")
-        logger.debug(f"State metadata: {state.metadata}")
+        logger.error(f"Loading service data for {service_name}")
+        logger.error(f"State metadata: {state.metadata}")
         db = state.metadata.get("db")
         if db is None:
             logger.error("Database session is None in load_service_data_node")
             raise ValueError("Database session is not available")
         service_data = await asyncio.create_task(load_service_data(db, service_name))
-        logger.debug(f"Service data loaded: {service_data}")
+        logger.error(f"Service data loaded: {service_data}")
         return {"metadata": {**state.metadata, "service_data": service_data}}
 
     async def load_tools_node(state: SubState):
-        logger.debug(f"Loading tools for {service_name}")
-        logger.debug(f"State metadata: {state.metadata}")
+        logger.error(f"Loading tools for {service_name}")
+        logger.error(f"State metadata: {state.metadata}")
         db = state.metadata.get("db")
         if db is None:
             logger.error("Database session is None in load_tools_node")
@@ -2724,11 +2770,11 @@ def create_worker_subgraph(service_name: str):
         # Создаем описание инструментов для промпта
         tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
         
-        logger.debug(f"Tools loaded: {[tool.name for tool in tools]}")
+        logger.error(f"Tools loaded: {[tool.name for tool in tools]}")
         return {"metadata": {**state.metadata, "tools": tools, "tool_node": tool_node, "tools_description": tools_description}}
 
     async def process_message(state: SubState):
-        logger.debug("Processing message")
+        logger.error("Processing message")
         service_data = state.metadata.get("service_data")
         tools = state.metadata.get("tools")
         tools_description = state.metadata.get("tools_description")
@@ -2739,8 +2785,15 @@ def create_worker_subgraph(service_name: str):
         
         context = "\n".join([doc.page_content for doc, _ in vector_docs])
         
+        chat_history = "\n".join([
+            f"{'User' if msg.sender_role == 'user' else 'Assistant'}: {msg.content.get('message', '')}"
+            for msg in state.chat_history[-5:]  # Последние 5 сообщений
+        ])
+        
         prompt_template = """You are an assistant for the {service_name} service of the Tatarstan Resident Card application.
         
+        ID пользователя:
+        {user_id}
         Available tools:
         {tools_description}
         
@@ -2753,21 +2806,32 @@ def create_worker_subgraph(service_name: str):
         Additional context:
         {context}
         
+        Chat history:
+        {chat_history}
+        
         User input: {user_input}
         
         Please respond to the user's input using the available tools if necessary. 
         Remember to include a meaningful description for each tool use."""
+        
         prompt = PromptTemplate.from_template(prompt_template)
-        logger.debug(f"Invoking LLM with prompt: {prompt.format(service_name=service_name, tools_description=tools_description, service_data=service_data.documentation if service_data else 'No service data available', context=context, user_input = state.user_input)}")
         bound = prompt | llm_with_tools
-        response = await bound.ainvoke({"service_name":service_name, "tools_description":tools_description, "service_data":service_data.documentation if service_data else 'No service data available', "context":context, "user_input":state.user_input})
-        logger.debug(f"LLM response received {response.content}")
+        response = await bound.ainvoke({
+            "service_name": service_name,
+            "tools_description": tools_description,
+            "service_data": service_data.prompt if service_data else 'No service data available',
+            "context": context,
+            "chat_history": chat_history,
+            "user_input": state.user_input,
+            "user_id":state.user_id
+        })
+        logger.error(f"LLM response received {response.content}")
         return {"answer": [response], "messages": response}
 
     async def load_vector_docs_node(state: SubState):
-        logger.debug(f"Loading vector documents for query: {state.user_input}")
+        logger.error(f"Loading vector documents for query: {state.user_input}")
         docs = await load_vector_documents(service_name, state.user_input)
-        logger.debug(f"Vector documents loaded: {len(docs)} documents")
+        logger.error(f"Vector documents loaded: {len(docs)} documents")
         return {"metadata": {**state.metadata, "vector_docs": docs}}
     
 
@@ -2782,16 +2846,16 @@ def create_worker_subgraph(service_name: str):
     subgraph.add_edge("load_vector_docs", "process_message")
 
     def should_use_tool(state: SubState):
-        logger.debug("Checking if tool should be used")
+        logger.error("Checking if tool should be used")
         last_message = state.messages[-1]
         if last_message.tool_calls:
-            logger.debug("Tool call detected")
+            logger.error("Tool call detected")
             return "use_tool"
-        logger.debug("No tool call detected")
+        logger.error("No tool call detected")
         return END
 
     async def use_tool(state: SubState):
-        logger.debug(f"Using tool. State at the moment: {state.dict()}")
+        logger.error(f"Using tool. State at the moment: {state.dict()}")
         tool_node = state.metadata.get("tool_node")
         if tool_node is None:
             logger.error("Tool node is None in use_tool")
@@ -2802,7 +2866,7 @@ def create_worker_subgraph(service_name: str):
         )
         tool_results = await tool_node.ainvoke({'messages':[tool_input]})
         
-        logger.debug("Processing tool results")
+        logger.error("Processing tool results")
         processed_results = []
         for result in tool_results.get("messages", []):
             if isinstance(result, dict) and "result" in result and "description" in result:
@@ -2813,7 +2877,7 @@ def create_worker_subgraph(service_name: str):
             else:
                 processed_results.append(result)
         
-        logger.debug(f"Processed {len(processed_results)} tool results")
+        logger.error(f"Processed {len(processed_results)} tool results")
         return {'answer':processed_results}
 
     subgraph.add_node("use_tool", use_tool)
@@ -2831,13 +2895,15 @@ def create_worker_subgraph(service_name: str):
     logger.info(f"Worker subgraph for {service_name} created successfully")
     return subgraph.compile()
 
+
 app/schemas/state.py
 
 from typing import List, Dict, Any, Optional, Annotated
-from pydantic.v1 import BaseModel as VBaseModel, Field as VField
+from pydantic.v1 import BaseModel as VBaseModel, Field as VField, create_model
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
+from ..database.models import ChatMessage
 
 class State(VBaseModel):
     messages: Annotated[List[AnyMessage], add_messages] = VField(default_factory=list)
@@ -2845,21 +2911,31 @@ class State(VBaseModel):
     user_input: str
     answer: Any = None
     user_id: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = VField(default_factory=dict)
+    chat_history: list = VField(default_factory=list)
 
 class SubState(VBaseModel):
     messages: Annotated[List[AnyMessage], add_messages] = VField(default_factory=list)
     user_input: str
+    user_id: str
     answer: Any = None
     service: Optional[str] = None
     metadata: Dict[str, Any] = VField(default_factory=dict)
-
-class RouterOutput(VBaseModel):
-    service: str
+    chat_history: list = VField(default_factory=list)
 
 class UserInput(BaseModel):
     user_input: str
     user_id: str
+
+def create_router_answer(service_names: List[str]):
+    return create_model(
+        'RouterAnswer',
+        answer=(str, Field(..., description="Points to service which is needed for user's request processing.")),
+        __config__=type('Config', (), {'use_enum_values': True})
+    )
+
+# Это будет обновляться при запуске приложения
+RouterAnswer = create_router_answer([])
 
 app/services/document_manager.py
 
@@ -2887,34 +2963,360 @@ app/services/router.py
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableConfig
-from ..schemas.state import State, RouterOutput
+from ..schemas.state import State, create_router_answer
 from .llm import init_chat_model
+from ..database.crud import get_all_services
+from langchain.pydantic_v1 import BaseModel, Field
+from typing import Literal
+router_parser = None
 
-router_parser = PydanticOutputParser(pydantic_object=RouterOutput)
+async def update_router_parser(db):
+    global router_parser
+    services = await get_all_services(db)
+    service_names = [service.name for service in services]
+    RouterAnswer = create_router_answer(service_names)
+    router_parser = PydanticOutputParser(pydantic_object=RouterAnswer)
 
+class DullRouterAnswer(BaseModel):
+    answer:Literal["Финансовый аналитик", "Бот навигатор по приложению"] = Field(description="Указывает на название выбранного для ответа сервиса. 'Финансовый аналитик' либо 'Бот навигатор по приложению'")
+
+
+dull_router_parser = PydanticOutputParser(pydantic_object=DullRouterAnswer)
 async def service_router(state: State, config: RunnableConfig) -> State:
+    db = state.metadata.get("db")
+    if db is None:
+        raise ValueError("Database session is not available")
+
+    if router_parser is None:
+        await update_router_parser(db)
+
+    # Получаем все сервисы из базы данных
+    services = await get_all_services(db)
+    
+    # Создаем строку с описанием всех сервисов
+    services_description = "\n".join([f"- {service.name}: {service.documentation}" for service in services])
+    
+    # Создаем список названий сервисов для использования в инструкциях формата
+    service_names = [service.name for service in services]
+
     prompt_template = """You are a service router for the Tatarstan Resident Card application. 
-    Determine which service the user's request is related to: 'accounts' or 'parking'. 
+    Determine which service the user's request is related to from the following list of available services:
+    {services_description}
+
     Use the following format for your answer: {format_instructions}
 
-    User's input: {user_input}
+    Chat history:
+    {chat_history}
+
+    Current user's input: {user_input}
+
+    Based on the chat history, the current user's input, and the available services, determine the most appropriate service.
+    If this is the first message in the conversation, or if the topic has clearly changed, choose the service that best matches the current input.
+    If the conversation is continuing on the same topic, prefer to use the same service as the last message unless the topic has clearly changed.
     """
     
     prompt = PromptTemplate(
         template=prompt_template,
-        input_variables=["user_input"],
-        partial_variables={"format_instructions": router_parser.get_format_instructions()}
+        input_variables=["services_description", "chat_history", "user_input"],
+        partial_variables={"format_instructions": dull_router_parser.get_format_instructions()}
     )
     
     llm = init_chat_model(mode="light")
-    chain = prompt | llm | router_parser
+    chain = prompt | llm | dull_router_parser
     
-    result = await chain.ainvoke({"user_input": state.user_input})
+    # Подготовим историю чата для промпта
+    chat_history = ""
+    for message in state.chat_history[-5:]:  # Берем последние 5 сообщений
+        role = "User" if message.sender_role == "user" else "Assistant"
+        content = message.content.get('message', '')
+        service = message.content.get('service', '')
+        chat_history += f"{role}: {content}\n"
+        if service:
+            chat_history += f"(Service used: {service})\n"
     
-    # Обновляем существующее состояние, а не создаем новое
+    result = await chain.ainvoke({
+        "services_description": services_description,
+        "chat_history": chat_history,
+        "user_input": state.user_input
+    })
+    
+    # Проверяем, что выбранный сервис существует
+    if result.answer not in service_names:
+        raise ValueError(f"Selected service '{result.answer}' is not in the list of available services")
+
+    # Обновляем существующее состояние
     state_dict = state.dict()
-    state_dict['service'] = result.service
+    state_dict['service'] = result.answer
     return state_dict
+
+app/services/service_creator.py
+import os
+from typing import List, Dict
+from langchain.document_loaders import (
+    CSVLoader, JSONLoader, Docx2txtLoader, UnstructuredExcelLoader,
+    PyMuPDFLoader, TextLoader, UnstructuredPowerPointLoader, NotebookLoader, BSHTMLLoader
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+import pandas as pd
+from ..tools.wrapper import ToolWrapper
+from ..database.crud import get_or_create_service, save_tool
+from ..services.vector_store import add_documents_to_vectorstore
+from sqlalchemy.ext.asyncio import AsyncSession
+from ..services.router import update_router_parser
+class DataAbstraction:
+    def __init__(self, filename: str):
+        self.type = filename.split('.')[-1]
+        self.filename = filename
+        self.sql_like = self.type in ["csv", "json", "xlsx"]
+
+    def get_loader(self):
+        loaders = {
+            "csv": CSVLoader,
+            "json": JSONLoader,
+            "docx": Docx2txtLoader,
+            "xlsx": UnstructuredExcelLoader,
+            "pdf": PyMuPDFLoader,
+            "txt": TextLoader,
+            "pptx": UnstructuredPowerPointLoader,
+            "ipynb": NotebookLoader,
+            "html": BSHTMLLoader
+        }
+        loader_class = loaders.get(self.type, TextLoader)
+        if self.type == "json":
+            return loader_class(file_path=self.filename, text_content=False).load()
+        elif self.type == "xlsx":
+            return loader_class(self.filename, mode="elements").load()
+        else:
+            return loader_class(self.filename).load()
+
+    def get_df(self):
+        if self.type in ["csv", "json", "xlsx"]:
+            return pd.read_csv(self.filename)
+        return None
+
+async def create_service(
+    db: AsyncSession,
+    service_name: str,
+    file_paths: List[str],
+    tools: List[ToolWrapper],
+    prompt: str,
+    documentation: str
+):
+    # Create or get the service
+    service = await get_or_create_service(db, service_name, prompt, documentation)
+
+    # Process documents
+    all_docs = []
+    for file_path in file_paths:
+        data = DataAbstraction(file_path)
+        docs = data.get_loader()
+        all_docs.extend(docs)
+
+    # Split documents
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=200)
+    splits = text_splitter.split_documents(all_docs)
+
+    # Prepare documents for vector store
+    vector_docs = [
+        Document(
+            page_content=split.page_content,
+            metadata={**split.metadata, "service": service_name}
+        )
+        for split in splits
+    ]
+
+    # Add documents to vector store
+    await add_documents_to_vectorstore(vector_docs)
+
+    # Save tools
+    for tool in tools:
+        await save_tool(db, tool, service.id)
+    await update_router_parser(db)
+
+    return service
+
+# Делаем анализатора финансов, автокнопку, техподдержку
+async def init_real_services(db: AsyncSession):
+    from ..tools.wrapper import ToolWrapper
+    from ..test_data import (
+        EmptyInput,SupportInput, PieChartInput, LineChartInput,
+        card_info_button,kindergarten_button, library_card_button,
+        taxes_payment_button, home_gas_payment_button, transfer_payment_button,
+        communal_services_button, traffic_fine_payment_button, balance_replenishment_button,
+        internet_replenishment_button, educational_card_replenishment_button, public_transport_card_replenishment_button,
+        pie_chart, line_chart, contact_tech_support
+    )
+
+    # Accounts service
+    await create_service(
+        db,
+        "Финансовый аналитик",
+        ["Тарифный план Карта жителя РТ.pdf", "ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf"],
+        [
+            ToolWrapper(
+                name="pie_chart",
+                description="Генерирует удобный pie график по какому то срезу транзакций пользователя",
+                function=pie_chart,
+                input_schema=PieChartInput
+            ),
+            ToolWrapper(
+                name="line_chart",
+                description="Генерирует удобный линейный график баланса пользователя. Помогает отследить тенденцию баланса пользователя.",
+                function=line_chart,
+                input_schema=LineChartInput
+            )
+        ],
+        prompt="""Ты - помощник пользователя по финансам. Ты работаешь с двумя таблицами - таблицей расходов и таблицей доходов пользователя.
+        Схема таблиц выглядит так: date, amount, category.
+        Категории расходов и сумма затрат за весь учетный период:
+        Перевод 27955
+        Оплата Продуктовый 42044
+        Оплата Ресторан 23511
+        Оплата Аптека 12862
+        Онлайн оплата 7877
+        Оплата Развлечения 8755
+        Оплата Ювелирный 11230
+        Категории дохождов и сумма доходов за весь учетный период:
+        Перевод 93170
+        Заработная плата 450000
+        Кэшбек 77073
+        Стипендия 45000
+        Дивиденды 49474
+        Тебе даны функции для показа специальной статистики финансах пользователя.
+        Отвечай на вопросы относительно финансового плана и целей.
+        Если ситуация позволяет можешь предложить другую карту оформить.""",
+        documentation="Сервис для помощи пользователю с финансовым учетом и финансовыми целями и накоплениями."
+    )
+
+    # Parking service
+    await create_service(
+        db,
+        "Бот навигатор по приложению",
+        ["ОБЩИЕ_УСЛОВИЯ_ВЫПУСКА_И_ОБСЛУЖИВАНИЯ_БАНКОВСКИХ_КАРТ_ПАО_АК_БАРС.pdf", "ФЗ_395_1_О_банках_и_банковской_деятельности.docx"],
+        [
+            ToolWrapper(
+                name="contact_tech_support",
+                description="Отправляет запрос на который тебе сложно было ответить в обращение в техподдержку",
+                function=contact_tech_support,
+                input_schema=SupportInput
+            ),
+            ToolWrapper(
+                name="card_info_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с информацией по банковской карте",
+                function=card_info_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="kindergarten_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой детского сада",
+                function=kindergarten_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="library_card_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с читательским билетом",
+                function=library_card_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="taxes_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой налогов и штрафов",
+                function=taxes_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="home_gas_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой Газа по штрих коду",
+                function=home_gas_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="transfer_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с Переводом на другую карту",
+                function=transfer_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="communal_services_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой ЖКХ",
+                function=communal_services_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="traffic_fine_payment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой штрафов ГИБДД",
+                function=traffic_fine_payment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="balance_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением баланса карты",
+                function=balance_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="internet_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением интернет провайдера",
+                function=internet_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="educational_card_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой образовательной карты",
+                function=educational_card_replenishment_button,
+                input_schema=EmptyInput
+            ),
+            ToolWrapper(
+                name="public_transport_card_replenishment_button",
+                description="Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой транспортной карты",
+                function=public_transport_card_replenishment_button,
+                input_schema=EmptyInput
+            ),
+        ],
+        prompt="""Ты помощник пользователя по навигации в приложении.
+        Ты находишься в мобильном приложении для Android и IOS Карты жителя Республики Татарстан.
+        Карта жителя Татарстана - банковские и социальные сервисы в одном приложении
+        • Выпустите цифровую Карту жителя или закажите пластиковую карту с курьерской доставкой
+        • Получайте бонусы за рекомендацию карты жителя
+        • Выпустите карту жителя для себя и ребенка
+        • Отслеживайте операции по карте жителя и детской карте жителя
+        • Узнайте об акциях и специальных предложениях от наших партнёров в разделе "Акции"
+        • Узнайте, какие льготы вам положены, и подайте заявку на их получение
+        • Сохраните читательский билет Национальной библиотеки РТ в электронном формате
+        • Совершайте платежи без комиссии
+        • Сохраняйте образовательную карту ребенка в мобильном приложении и отслеживайте баланс по карте, а также расходы на питание в школьной столовой. Пополняйте образовательную карту в пару кликов с вашей карты жителя
+        • Объединяйте детскую карту жителя вашего ребенка с образовательной картой, ваш ребенок сможет использовать детскую карту жителя как в школе так и в торговых сетях
+        • Подключайте автопополнение образовательной карт и управляйте им прямо из приложения
+
+
+        Интерфейс приложения Карты жителя татарстан:
+        - Кнопка на нижней панели "Главное" cодержит в себе:
+            - Банковская карта
+            - Другие карты
+            - Портал "Забота". Социальные льготы и начисления
+            - Читательский билет. Сохранение читательского билета в электронном формате
+        - Кнопка на нижней панели "Платежи" содержит ссылки на оплату данных услуг:
+            - Детский сад
+            - Транспортная карта
+            - Обркарта
+            - ЖКХ
+            - Газ по штрих-коду
+            - Штрафы ГИБДД
+            - Налоги, штрафы, госплатежи
+            - Интернет
+            - Телевидение
+            - Домашний телефон
+        - Кнопка на нижней панели "Акции" содержит в себе:
+            - Список акций партнеров
+            - Карта с точками, магазинами партнеров и их акциями
+        - Кнопка на нижней панели "Новости" содержит в себе:
+            - Новости 
+        """,
+        documentation="Сервис помогающий с навигацией и основными вопросами по приложению. Также может обрабатывать запросы в техподдержку."
+    )
+
+    print("Реальные сервисы успешно инициализированы")
 
 app/services/vector_store.py
 from functools import lru_cache
@@ -2937,89 +3339,9 @@ def get_vectorstore() -> PGVector:
     )
     return vectorstore
 
-async def add_documents_to_vectorstore(documents, service_name):
+async def add_documents_to_vectorstore(documents):
     vectorstore = get_vectorstore()
-    await vectorstore.aadd_documents(documents, metadatas=[{"service": service_name} for _ in documents])
-
-app/tools/base.py
-from pydantic import BaseModel, Field
-from typing import Any, Dict, Callable
-from langchain_core.tools import tool
-
-class ToolInput(BaseModel):
-    pass
-
-class ToolOutput(BaseModel):
-    result: Any
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-class BaseTool:
-    def __init__(self, func: Callable, name: str, description: str):
-        self.func = func
-        self.name = name
-        self.description = description
-
-    def __call__(self, **kwargs) -> ToolOutput:
-        result = self.func(**kwargs)
-        return ToolOutput(result=result)
-
-    @classmethod
-    def from_function(cls, func: Callable, name: str, description: str):
-        return cls(func, name, description)
-
-def create_tool(func: Callable, name: str, description: str, input_schema: type[ToolInput]):
-    @tool(name, description=description, args_schema=input_schema)
-    def wrapped_tool(**kwargs) -> Dict[str, Any]:
-        tool_instance = BaseTool.from_function(func, name, description)
-        output = tool_instance(**kwargs)
-        return {"result": output.result, "metadata": output.metadata}
-
-    return wrapped_tool
-
-app/tools/wrapper.py
-
-from typing import List, Dict, Any, Callable
-from pydantic import BaseModel, Field
-from langchain_core.tools import BaseTool, tool
-
-class ToolWrapper(BaseModel):
-    name: str
-    description: str
-    function: Callable
-    input_schema: type[BaseModel]
-
-def create_tool_from_callable(tool_wrapper: ToolWrapper) -> BaseTool:
-    # Создаем новую схему ввода, которая включает оригинальные поля и description
-    class EnhancedInputSchema(tool_wrapper.input_schema):
-        description: str = Field(..., description="Дополнительное описание для пользователя")
-
-    @tool(tool_wrapper.name, args_schema=EnhancedInputSchema)
-    def dynamic_tool(**kwargs) -> Dict[str, Any]:
-        """
-        {description}
-
-        This tool takes the following arguments:
-        {args_description}
-        """
-        # Извлекаем description и передаем остальные аргументы в оригинальную функцию
-        description = kwargs.pop('description')
-        result = tool_wrapper.function(**kwargs)
-        return {
-            "result": result,
-            "description": description
-        }
-    
-    # Обновляем документацию функции
-    args_description = "\n".join([f"- {field}: {field_info.description}" for field, field_info in EnhancedInputSchema.__fields__.items() if field != 'description'])
-    dynamic_tool.__doc__ = dynamic_tool.__doc__.format(
-        description=tool_wrapper.description,
-        args_description=args_description
-    )
-    
-    return dynamic_tool
-
-def create_tools(tools: List[ToolWrapper]) -> List[BaseTool]:
-    return [create_tool_from_callable(tool_wrapper) for tool_wrapper in tools]
+    await vectorstore.aadd_documents(documents)
 
 app/config.py
 from pydantic_settings import BaseSettings
@@ -3053,153 +3375,309 @@ from .graphs.main_graph import create_main_graph
 from .schemas.state import State, UserInput
 import json
 from langchain_core.messages import ToolMessage
+from .database.crud import create_chat_message
+from .services.router import update_router_parser
+from app.database.connection import AsyncSessionLocal
 app = FastAPI()
+main_graph = None
 
-main_graph = create_main_graph()
-
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup_event():
+    global main_graph
+    async with AsyncSessionLocal() as db:
+        await update_router_parser(db)
+        main_graph = await create_main_graph(db)
 
 @app.post("/chat")
 async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
     try:
+        # Сохраняем сообщение пользователя
+        await create_chat_message(db, user_input.user_id, "user", {"message": user_input.user_input})
+
         initial_state = State(
             user_input=user_input.user_input,
             user_id=user_input.user_id,
-            metadata={"db": db}  # Не передавайте db здесь
+            metadata={"db": db}
         )
-        logger.debug(f"Initial state: {initial_state}")
         
         result = await main_graph.ainvoke(initial_state)
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(result)
-        # Обработка результата перед возвратом
+        
+        # Обработка результата
         pre_answer = result['answer'][0]
+        print(result)
         if isinstance(pre_answer, ToolMessage):
-            answer = json.loads(pre_answer.content)
-            return answer
+            answer:dict = json.loads(pre_answer.content)
+            # Сохраняем ответ бота
+            print(answer)
+            resultt = answer.get('result', {})
+            tipe = resultt.pop("type")
+            description = answer.get('description', '')
+            await create_chat_message(db, user_input.user_id, "bot", {
+                "service": result.get('service'),
+                "type": tipe,
+                "tool_call": resultt,
+                "message": description
+            })
+            return {
+                "tool_call": resultt,
+                "type": tipe,
+                "message": description
+            }
         else:
             answer = pre_answer.content
-            return answer
+            print("!!!", answer)
+            await create_chat_message(db, user_input.user_id, "bot", {
+                "service": result.get('service'),
+                "message": answer
+            })
+            return {
+                "tool_call": {},
+                "type":'text',
+                "message": answer
+            }
     except Exception as e:
         logger.exception("An error occurred during chat processing")
         raise HTTPException(status_code=500, detail=str(e))
 
-def process_result(result):
-    # Здесь вы можете обработать результат, удалив несериализуемые объекты
-    # Например:
-    if isinstance(result, dict):
-        return {k: v for k, v in result.items() if is_serializable(v)}
-    return result
-
-def is_serializable(obj):
-    try:
-        json.dumps(obj)
-        return True
-    except (TypeError, OverflowError):
-        return False
-
 app/test_data.py
+
 from typing import Dict
 from pydantic import BaseModel, Field
 from .tools.wrapper import ToolWrapper
+from typing import Literal
+import pandas as pd
+import random
 
-class AccountBalanceInput(BaseModel):
-    account_number: str = Field(..., description="Номер счета")
 
-class TransferMoneyInput(BaseModel):
-    from_account: str = Field(..., description="Номер счета отправителя")
-    to_account: str = Field(..., description="Номер счета получателя")
-    amount: float = Field(..., description="Сумма перевода")
-
-class ParkingInfoInput(BaseModel):
-    parking_id: str = Field(..., description="ID парковки")
-
-class ReserveParkingSpotInput(BaseModel):
-    parking_id: str = Field(..., description="ID парковки")
+class EmptyInput(BaseModel):
     user_id: str = Field(..., description="ID пользователя")
 
-def get_account_balance(account_number: str) -> Dict[str, float]:
-    """
-    Получает баланс счета по номеру счета.
-    """
-    balance = float(account_number) * 100  # Просто для примера
-    return {"balance": balance}
+class SupportInput(BaseModel):
+    user_id: str = Field(..., description="ID пользователя")
+    message: str = Field(..., description="Сообщение в техподдержку на которое ты не смог ответить")
 
-def transfer_money(from_account: str, to_account: str, amount: float) -> Dict[str, str]:
-    """
-    Переводит деньги с одного счета на другой.
-    """
-    return {"status": "success", "message": f"Переведено {amount} с счета {from_account} на счет {to_account}"}
+class PieChartInput(BaseModel):
+    data_type: Literal["Income", "Expense"] = Field(..., description="Раздел транзакций пользователя по которому будет построен график.Только 'Income' или 'Expense'")
+    time_period: Literal["last_month", "all_time"] = Field(..., description="Временной период для статистики. Опции: 'last_month', 'all_time'")
 
-def get_parking_info(parking_id: str) -> Dict[str, str]:
+class LineChartInput(BaseModel):
+    user_id : str = Field(..., description='ID пользователя')
+
+class SummaryTableInput(BaseModel):
+    data_type: Literal["All", "Income", "Expense"] = Field(..., description='Раздел транзакций пользователя по которому будет показана статистика. На выбор "All", "Income", "Expense"')
+
+def balance_replenishment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением баланса карты
+
+    Args:
+        user_id (str): _description_
+
+    Returns:
+        Dict: результат во фронтенд
     """
-    Получает информацию о парковке по её ID.
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Пополнение баланса","type":"button","buttonBody":"Отправить"}
+
+def transfer_payment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с Переводом на другую карту
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
     """
-    return {"id": parking_id, "name": f"Парковка {parking_id}", "available_spots": "25"}
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Перевод и оплата","type":"button","buttonBody":"Отправить"}
 
-def reserve_parking_spot(parking_id: str, user_id: str) -> Dict[str, str]:
+def card_info_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с информацией по банковской карте
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
     """
-    Резервирует место на парковке для пользователя.
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Информация по карте","type":"button","buttonBody":"Отправить"}
+
+def kindergarten_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой детского сада
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
     """
-    return {"status": "success", "message": f"Место на парковке {parking_id} зарезервировано для пользователя {user_id}"}
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж детский сад","type":"button","buttonBody":"Отправить"}
 
-# Словарь сервисов и их функций с соответствующими схемами ввода
-test_services = {
-    "accounts": [
-        ToolWrapper(
-            name="get_account_balance",
-            description="Получает баланс счета по номеру счета",
-            function=get_account_balance,
-            input_schema=AccountBalanceInput
-        ),
-        ToolWrapper(
-            name="transfer_money",
-            description="Переводит деньги с одного счета на другой",
-            function=transfer_money,
-            input_schema=TransferMoneyInput
-        )
-    ],
-    "parking": [
-        ToolWrapper(
-            name="get_parking_info",
-            description="Получает информацию о парковке по её ID",
-            function=get_parking_info,
-            input_schema=ParkingInfoInput
-        ),
-        ToolWrapper(
-            name="reserve_parking_spot",
-            description="Резервирует место на парковке для пользователя",
-            function=reserve_parking_spot,
-            input_schema=ReserveParkingSpotInput
-        )
-    ]
-}
+def communal_services_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой ЖКХ
 
-# Функция для инициализации тестовых данных в базе данных
-async def init_test_data(db):
-    from .database.crud import get_or_create_service, save_tool
-    from .tools.wrapper import ToolWrapper
+    Args:
+        user_id (str): ID пользователя
 
-    for service_name, tools in test_services.items():
-        service = await get_or_create_service(db, service_name, f"Это сервис {service_name}", f"Документация для сервиса {service_name}")
-        
-        for tool in tools:
-            await save_tool(db, tool, service.id)
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж ЖКХ","type":"button","buttonBody":"Отправить"}
 
-    print("Тестовые данные успешно инициализированы")
+def public_transport_card_replenishment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой транспортной карты
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Транспортная карта","type":"button","buttonBody":"Отправить"}
+
+def educational_card_replenishment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой образовательной карты 
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Образовательная карта","type":"button","buttonBody":"Отправить"}
+
+def home_gas_payment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой Газа по штрих коду
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Газ по штрих коду","type":"button","buttonBody":"Отправить"}
+
+def traffic_fine_payment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой штрафов ГИБДД
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Штрафы ГИБДД","type":"button","buttonBody":"Отправить"}
+
+def taxes_payment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с оплатой налогов и штрафов
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Налоги, штрафы","type":"button","buttonBody":"Отправить"}
+
+def internet_replenishment_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с пополнением интернет провайдера
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Платеж Интернет","type":"button","buttonBody":"Отправить"}
+
+def library_card_button(user_id:str):
+    """Отправляет пользователю быструю кнопку отсылающую его на страницу с читательским билетом
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Читательский Билет","type":"button","buttonBody":"Отправить"}
+
+def contact_tech_support(user_id:str, message:str):
+    """Отправляет запрос на который тебе сложно было ответить в обращение в техподдержку
+
+    Args:
+        user_id (str): ID пользователя
+        message (str): сообщение пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    return {"url":"https://youtu.be/dQw4w9WgXcQ?si=kqouW7rK3vCMOzT6", "header":"Ваш запрос направлен в тех поддержку.","buttonBody":"Отправить","type":"button"}
+
+def pie_chart(data_type: Literal["Income", "Expense"], time_period: Literal["last_month", "all_time"]):
+    """Генерирует удобный pie график по какому то срезу транзакций пользователя
+
+    Args:
+        data_type (Literal[&quot;Income&quot;, &quot;Expense&quot;]): Income or Expense - раздел транзакций
+        time_period (Literal[&quot;last_month&quot;, &quot;all_time&quot;]): Временной период
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    if data_type == "Income":
+        df = pd.read_csv("ddata.csv")
+        number_of_colors = len(df["category"].unique())
+        color = ["#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)])
+             for i in range(number_of_colors)]
+        print(color)
+        df['date'] = pd.to_datetime(df['date'])
+        if time_period=="all_time":
+            data = [{'object':i, 'value':int(df[df['category']==i]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
+        else:
+            data = [{'object':i, 'value':int(df[(df['category'] == i) & (df['date'] >= pd.Timestamp('20240406'))]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
+        return {"chartPieConfig":{"value":{"label":"Рублей"}},"chartPieData":data,"type":"chartPie"}
+    else:
+        df = pd.read_csv("data.csv")
+        number_of_colors = len(df["category"].unique())
+        color = ["#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)])
+             for i in range(number_of_colors)]
+        print(color)
+        df['date'] = pd.to_datetime(df['date'])
+        if time_period=="all_time":
+            data = [{'object':i, 'value':int(df[df['category']==i]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
+        else:
+            data = [{'object':i, 'value':int(df[(df['category'] == i) & (df['date'] >= pd.Timestamp('20240406'))]['amount'].sum()), "fill":("#"+''.join([random.choice('0123456789ABCDEF') for j in range(6)]))} for i in df['category'].unique()]
+        return {"chartPieConfig":{"value":{"label":"Рублей"}},"chartPieData":data,"type":"chartPie"}
+
+
+def line_chart(user_id: str):
+    """Генерирует удобный линейный график баланса пользователя. Помогает отследить тенденцию баланса пользователя.
+
+    Args:
+        user_id (str): ID пользователя
+
+    Returns:
+        Dict: результат во фронтенд
+    """
+    df = pd.read_csv("data.csv")
+    rdf = pd.read_csv("ddata.csv")
+    df['date'] = pd.to_datetime(df['date'])
+    rdf['date'] = pd.to_datetime(rdf['date'])
+    data = []
+    for i in range(281):
+        data.append({"date":(pd.Timestamp("20230823") + pd.Timedelta(days=i)).__str__()[:10], "value":int(rdf[rdf["date"] <= (pd.Timestamp("20230823") + pd.Timedelta(days=i))]["amount"].sum() - df[df["date"] <= (pd.Timestamp("20230823") + pd.Timedelta(days=i))]["amount"].sum())})
+    return {"inputChartConfig":{"characteristic":"Рублей на балансе"}, "LineChartData":data, "type":"chartLine"}
 
 run.py
-
 import asyncio
-from app.main import app
+from app.main import app, startup_event
 from app.database.connection import AsyncSessionLocal
-from app.test_data import init_test_data
+from app.services.service_creator import init_real_services
 import uvicorn
 
 async def init_data():
     async with AsyncSessionLocal() as db:
-        await init_test_data(db)
+        await init_real_services(db)
+    await startup_event()
 
 async def main():
     await init_data()
@@ -3209,4 +3687,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
