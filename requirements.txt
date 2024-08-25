@@ -23,3 +23,4 @@ dill
 pandas
 pymupdf
 docx2txt
+langfuse

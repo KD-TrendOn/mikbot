@@ -10,7 +10,9 @@ from .database.crud import create_chat_message
 from .services.router import update_router_parser
 from app.database.connection import AsyncSessionLocal
 from contextlib import asynccontextmanager
+from langfuse.callback import CallbackHandler
 
+langfuse_handler = CallbackHandler()
 main_graph = None
 
 
@@ -44,7 +46,9 @@ async def chat(user_input: UserInput, db: AsyncSession = Depends(get_db)):
             metadata={"db": db},
         )
 
-        result = await main_graph.ainvoke(initial_state)
+        result = await main_graph.ainvoke(
+            initial_state, config={"callbacks": [langfuse_handler]}
+        )
 
         # Обработка результата
         pre_answer = result["answer"][0]
